@@ -1,0 +1,22 @@
+{
+    "User is navigated to application": {
+        "strategy": "xpath",
+        "value": "//button[contains(normalize-space(.),'Login')]"
+    },
+    "user enters username \"Admin\"": {
+        "strategy": "name",
+        "value": "username"
+    },
+    "user enter password \"Admin123\"": {
+        "strategy": "name",
+        "value": "password"
+    },
+    "user clicks on login button": {
+        "strategy": "xpath",
+        "value": "//button[contains(normalize-space(.),'Login')]"
+    },
+    "Login should be successfull": {
+        "strategy": "xpath",
+        "value": "//button[contains(normalize-space(.),'Login')]"
+    }
+}

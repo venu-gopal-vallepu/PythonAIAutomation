@@ -1,0 +1,41 @@
+# --- Index for PyTorch CUDA 12.6 ---
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# --- Core Deep Learning (EasyOCR Engine) ---
+torch
+torchvision
+torchaudio
+
+# --- Vision & OCR ---
+easyocr
+opencv-python
+Pillow
+matplotlib
+
+# --- Browser Automation ---
+selenium
+beautifulsoup4
+
+# --- Testing & BDD ---
+pytest
+pytest-bdd
+pytest-env
+allure-pytest-bdd
+
+# --- NLP & Semantic Intelligence ---
+spacy
+# Note: After install, run: python -m spacy download en_core_web_md
+
+# --- Math & Spatial Analysis (Proximity Detection) ---
+numpy
+scipy
+
+# --- Utility & Infrastructure ---
+pyyaml
+requests
+cryptography
+junitparser
+thefuzz
+pydantic
+python-dotenv
+loguru
