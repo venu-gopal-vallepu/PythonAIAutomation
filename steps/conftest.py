@@ -57,22 +57,28 @@ def pytest_runtest_makereport(item, call):
 
 
 def pytest_bdd_before_step(request, feature, scenario, step, step_func):
-    """The Interceptor: Wakes up the AI before a BDD step starts."""
-    if request.config.getoption("--generate") and "ai_generate" in step.tags:
-        print(f"\n🚀 [AI INTERCEPTOR] Analyzing Step: {step.name}")
+    """
+    The Nervous System: Intercepts the step before it executes.
+    If --generate is on and [ai] is in the step name, it triggers discovery.
+    """
+    if request.config.getoption("--generate") and "[ai]" in step.name.lower():
+        print(f"\n🤖 [AI INTERCEPTOR] Discovery triggered for: {step.name}")
 
-        # Access the live driver from the setup fixture
-        driver_fixture = request.getfixturevalue("setup")
-        driver = driver_fixture['driver'] if isinstance(driver_fixture, dict) else driver_fixture
+        # 1. Grab the active driver session from your fixtures
+        driver = request.getfixturevalue("driver")
 
-        # Initialize AI and run Composite Discovery
-        ai_engine = AIAutomationFramework(driver)
-        generated_code = ai_engine.discover_composite_logic(step.name)
+        # 2. Initialize the AI Brain
+        ai = AIAutomationFramework(driver)
 
-        print("\n" + "=" * 40)
-        print("PROPOSED PAGE OBJECT METHOD:")
+        # 3. Discover the logic and get the code
+        generated_code = ai.discover_composite_logic(step.name)
+
+        # 4. Print it clearly to the terminal for copy-pasting
+        print("\n" + "🚀" + "=" * 60)
+        print("PASTE THIS INTO YOUR PAGE OBJECT CLASS:")
+        print("-" * 60)
         print(generated_code)
-        print("=" * 40 + "\n")
+        print("=" * 62 + "\n")
 
 
 # --- Session Finish: Report Generation & Email ---
