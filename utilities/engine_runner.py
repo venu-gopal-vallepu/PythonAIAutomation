@@ -1,69 +1,42 @@
 import time
-import os
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-
 from utilities.ai_engine import AIAutomationFramework
 
 
-def run_ai_discovery():
-    """
-    Enterprise Accelerator Runner:
-    - Sets up a clean automation session.
-    - Bridges the BDD Feature with the Framework Page Objects.
-    - Generates Inherited, Action-Based Page Objects.
-    """
-    # 1. Browser Configuration
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
+def run_accelerated_discovery():
+    """Standalone mode to build Page Objects via hardcoded navigation."""
     driver = webdriver.Chrome()
+    driver.maximize_window()
 
     try:
-        # 2. Navigate to Application Under Test (AUT)
-        target_url = "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
-        print(f"--- Step 1: Navigating to {target_url} ---")
-        driver.get(target_url)
-
-        # 3. Stability Buffer
-        # Wait for the DOM to be fully 'Actionable'
+        # Step 1: Manual Navigation
+        url = "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
+        print(f"--- 1. Navigating to {url} ---")
+        driver.get(url)
         time.sleep(5)
 
-        # 4. Initialize AI Discovery Utility
-        utility = AIAutomationFramework(driver)
+        # Step 2: Define the BDD requirement
+        # This example uses one hardcoded value and one placeholder
+        bdd_step = 'user enters username "Admin" and password <user-password>'
 
-        # 5. Project Path Orchestration
-        # Using relative paths so the project works on any machine/environment
-        base_dir = os.getcwd()
-        feature_file = os.path.join(base_dir, "features", "login_features", "login.feature")
-        page_name = "LoginPage"
-        output_dir = os.path.join(base_dir, "features", "pages")
+        print(f"--- 2. Analyzing Requirement: {bdd_step} ---")
+        ai = AIAutomationFramework(driver)
 
-        print(f"--- Step 2: Analyzing Feature File ---")
-        print(f"Target: {os.path.basename(feature_file)}")
+        # Step 3: Trigger Generation
+        generated_code = ai.discover_composite_logic(bdd_step)
 
-        # 6. Generate Inherited POM
-        # 'use_base_page=True' ensures it connects to your framework's BasePage
-        utility.generate_pom(
-            feature_file,
-            page_name,
-            output_dir=output_dir,
-            use_base_page=True
-        )
-
-        print(f"\n✅ REUSABLE LIBRARY CREATED: {page_name}.py")
-        print(f"✅ VISUAL AUDIT MAP SAVED in: {output_dir}")
+        print("\n✅ POM CODE GENERATED:")
+        print("-" * 50)
+        print(generated_code)
+        print("-" * 50)
+        print("\n💡 Elements are highlighted in GREEN in the browser.")
+        time.sleep(10)
 
     except Exception as e:
-        print(f"\n❌ DISCOVERY FAILED: {str(e)}")
-
+        print(f"❌ Error: {e}")
     finally:
-        # Final pause to inspect the 'Green Highlights' on the browser
-        print("--- Discovery Complete. Closing session in 3 seconds... ---")
-        time.sleep(3)
         driver.quit()
 
 
 if __name__ == "__main__":
-    run_ai_discovery()
+    run_accelerated_discovery()
