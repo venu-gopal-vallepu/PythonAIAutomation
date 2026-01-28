@@ -108,21 +108,35 @@ class AIAutomationFramework:
         return None
 
     def discover_composite_logic(self, step_text):
-        """Decomposes BDD steps with multiple parameters into a POM method."""
-        # 1. Identify parameters ("value" or <placeholder>)
-        params = re.findall(r"['\"](.*?)['\"]|<(.*?)>", step_text)
+        """
+        Decomposes BDD steps with multiple parameters.
+        Only triggers AI logic if the '[ai]' tag is present in the step text.
+        """
+        # 1. Check for the AI signal
+        is_ai_trigger = "[ai]" in step_text.lower()
+
+        if not is_ai_trigger:
+            return "# AI Discovery not triggered for this step (Missing [ai] tag)."
+
+        # 2. Clean the step text for processing (Remove the [ai] tag from the data)
+        clean_step_text = step_text.replace("[ai]", "").replace("  ", " ").strip()
+
+        # 3. Identify parameters from the CLEANED text
+        params = re.findall(r"['\"](.*?)['\"]|<(.*?)>", clean_step_text)
         param_names = [p[0] if p[0] else p[1] for p in params]
 
-        # 2. Extract context intents (Smart Split)
-        raw_intents = re.split(r"['\"].*?['\"]|<.*?>", step_text.lower())
+        # 4. Extract context intents (Smart Split)
+        raw_intents = re.split(r"['\"].*?['\"]|<.*?>", clean_step_text.lower())
 
         mappings = []
         for i, p_name in enumerate(param_names):
             intent_context = raw_intents[i].strip()
-            # Borrow context from previous segment if current is too thin
+
+            # Borrow context if current intent is too vague
             if len(intent_context) < 3 and i > 0:
                 intent_context = f"{raw_intents[i - 1]} {intent_context}".strip()
 
+            # Remove BDD keywords (given/when/then) but keep the identity context
             clean_intent = re.sub(r'^(given|when|then|and|but)\s+', '', intent_context)
 
             loc = self._find_locator_weighted(clean_intent)
@@ -131,9 +145,16 @@ class AIAutomationFramework:
                 arg_name = p_name.replace("-", "_").replace(" ", "_")
                 mappings.append({"loc": loc, "arg": arg_name, "intent": clean_intent})
 
-        # 3. Generate Method with Unique Naming
-        base_name = "_".join(re.sub(r"['\"].*?['\"]|<.*?>", "", step_text).lower().split()[:3])
-        method_name = f"{base_name}_{'_'.join([m['arg'] for m in mappings])}".strip("_")
+        # 5. Evidence & Code Generation
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        self.driver.save_screenshot(f"logs/AI_Map_{timestamp}.png")
+
+        # Generate unique method name from the cleaned text
+        method_base = "_".join(re.sub(r"['\"].*?['\"]|<.*?>", "", clean_step_text).lower().split()[:3])
+        method_name = f"{method_base}_{'_'.join([m['arg'] for m in mappings])}".strip("_")
 
         args = ", ".join(["self"] + [m['arg'] for m in mappings])
         code = [f"    def {method_name}({args}):"]
