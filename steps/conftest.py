@@ -16,6 +16,8 @@ test_results = {}
 # --- Pytest Configuration & Options ---
 def pytest_addoption(parser):
     parser.addoption("--generate", action="store_true", help="Run AI discovery for tagged steps")
+    parser.addoption("--page-file", action="store", default=None,
+                     help="Target file name in feature/page/ to append or create")
 
 
 # --- Fixtures ---
@@ -90,40 +92,71 @@ def pytest_bdd_after_step(request, feature, scenario, step, step_func):
 @pytest.hookimpl
 def pytest_bdd_after_scenario(request, feature, scenario):
     """
-    Sends buffered data to Spark Assist for final Page Object generation.
+    Finalizes the AI Code Generation flow.
+    Handles 'Smart Append' vs 'New File' and ensures correct Python indentation.
     """
     ai_context = request.getfixturevalue("ai_context")
 
-    # Only trigger if the scenario is tagged and we actually captured UI data
-    if "ai_prompt" in scenario.tags and ai_context["buffer"]:
-        print(f"\n--- ⚡ Spark Assist: Generating Page Object for '{scenario.name}' ---")
+    # Check if scenario is tagged for generation and we have captured UI metadata
+    if "ai_prompt" in scenario.tags and ai_context.get("buffer"):
+        target_file = request.config.getoption("--page-file")
+        output_dir = "feature/page"
+        os.makedirs(output_dir, exist_ok=True)
 
-        payload = {
-            "instruction": ai_context["prompt"] or "Generate a standard Page Object",
-            "scenario": ai_context["scenario_name"],
-            "mappings": ai_context["buffer"]
-        }
+        # 1. Determine target file path and mode
+        file_path = None
+        is_append = False
 
-        try:
-            # Use the SparkAssist utility we updated with the signature scanner
-            spark = SparkAssist()
-            generated_code = spark.generate_page_object(payload)
-
-            # Define output directory and file path
-            output_dir = "generated_pages"
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Sanitize file name
+        if target_file:
+            file_path = os.path.join(output_dir, target_file)
+            is_append = os.path.exists(file_path)
+        else:
+            # Default: sanitize scenario name for filename (e.g. "User Login" -> "user_login.py")
             clean_name = scenario.name.replace(' ', '_').replace('-', '_').lower()
             file_path = os.path.join(output_dir, f"{clean_name}.py")
 
-            with open(file_path, "w") as f:
-                f.write(generated_code)
+        # 2. Adjust instruction for Spark Assist
+        instruction = ai_context.get("prompt", "Generate Page Object")
+        if is_append:
+            instruction += (
+                " (STRICT: This is an APPEND. Do not include imports or class header. "
+                "Provide ONLY class-level locators and methods.)"
+            )
 
-            print(f"✅ SUCCESS: Page Object saved to {file_path}")
+        payload = {
+            "instruction": instruction,
+            "scenario": scenario.name,
+            "mappings": ai_context["buffer"],
+            "format_preference": "LOCATORS_AT_TOP"  # Tells Spark to use btn_ / txt_ variables
+        }
+
+        try:
+            spark = SparkAssist()
+            generated_code = spark.generate_page_object(payload)
+
+            # 3. Handle Indentation for Appends
+            # If appending, we must indent the AI's code by 4 spaces to stay inside the class
+            if is_append:
+                final_output = "\n".join([f"    {line}" if line.strip() else line
+                                          for line in generated_code.splitlines()])
+                mode = "a"
+                header = f"\n\n    # --- Methods for Scenario: {scenario.name} ---\n"
+            else:
+                final_output = generated_code
+                mode = "w"
+                header = ""
+
+            # 4. Write to disk
+            with open(file_path, mode) as f:
+                f.write(header + final_output)
+
+            print(f"✅ Framework Path Maintained: Code {'appended to' if is_append else 'created in'} {file_path}")
+
+            # 5. CRITICAL: Clear buffer so the next scenario starts with a clean slate
+            ai_context["buffer"] = []
 
         except Exception as e:
-            print(f"❌ Spark Assist Call Failed: {e}")
+            print(f"❌ Generation Error for scenario '{scenario.name}': {e}")
 
 
 # --- Reporting Hooks (Existing Logic) ---
