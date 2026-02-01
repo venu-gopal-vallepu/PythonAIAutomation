@@ -1,13 +1,13 @@
+import os
+import pytest
 import re
 import smtplib
 import time
-import os
-import pytest
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
-from utilities.spark_assist import SparkAssist  # Assuming this exists
+from utilities.spark_assist import SparkAssist
 
 # --- Global State ---
 test_results = {}
@@ -39,63 +39,91 @@ def ai_context():
 
 # --- Hooks: BDD Orchestration ---
 
-def pytest_bdd_before_scenario(request, feature, scenario, ai_context):
-    """Extracts the # prompt from the feature file before scenario starts."""
+
+@pytest.hookimpl
+def pytest_bdd_before_scenario(request, feature, scenario):
+    """
+    Extracts the # prompt from the feature file before scenario starts.
+    Retrieves ai_context via request.getfixturevalue.
+    """
+    ai_context = request.getfixturevalue("ai_context")
+
     if "ai_prompt" in scenario.tags:
         ai_context["scenario_name"] = scenario.name
         try:
             with open(feature.filename, 'r') as f:
                 content = f.read()
-                # Matches the comment directly above the @ai_prompt tag
+                # Matches the comment line directly above the @ai_prompt tag
                 match = re.search(r'#(.*)\n\s*@ai_prompt', content)
                 if match:
                     ai_context["prompt"] = match.group(1).strip()
+                    print(f"ℹ️ Found AI Prompt: {ai_context['prompt']}")
         except Exception as e:
             print(f"⚠️ Error reading feature metadata: {e}")
 
 
-def pytest_bdd_after_step(request, feature, scenario, step, step_func, ai_context):
-    """Intercepts [AI] steps and buffers locator data from the engine."""
+@pytest.hookimpl
+def pytest_bdd_after_step(request, feature, scenario, step, step_func):
+    """
+    Intercepts [AI] steps and buffers locator metadata.
+    Uses request.getfixturevalue to access shared state.
+    """
+    # Check if --generate flag is used and if the step is an AI step
     if request.config.getoption("--generate") and "[ai]" in step.name.lower():
-        # Get driver from the 'setup' fixture (dictionary)
+        ai_context = request.getfixturevalue("ai_context")
+
+        # Unpack driver from your setup fixture
         setup_data = request.getfixturevalue("setup")
         driver = setup_data['driver']
 
-        # Initialize Engine and Discover Metadata (Structured Data)
+        # Initialize Engine and Discover Metadata
         ai_engine = AIAutomationFramework(driver)
+        print(f"--- 🔍 AI Discovery: {step.name} ---")
         step_metadata = ai_engine.get_step_metadata(step.name)
 
         if step_metadata:
+            # Add results to the shared buffer
             ai_context["buffer"].extend(step_metadata)
-            print(f"✔ [AI] Cached {len(step_metadata)} elements for step: {step.name}")
+            print(f"✔ [AI] Cached {len(step_metadata)} elements for: {step.name}")
 
 
-def pytest_bdd_after_scenario(request, feature, scenario, ai_context):
-    """Sends buffered data to Spark Assist for code generation."""
+@pytest.hookimpl
+def pytest_bdd_after_scenario(request, feature, scenario):
+    """
+    Sends buffered data to Spark Assist for final Page Object generation.
+    """
+    ai_context = request.getfixturevalue("ai_context")
+
+    # Only trigger if the scenario is tagged and we actually captured UI data
     if "ai_prompt" in scenario.tags and ai_context["buffer"]:
-        print(f"\n--- ⚡ Connecting to Spark Assist for Scenario: {scenario.name} ---")
+        print(f"\n--- ⚡ Spark Assist: Generating Page Object for '{scenario.name}' ---")
 
         payload = {
-            "instruction": ai_context["prompt"],
+            "instruction": ai_context["prompt"] or "Generate a standard Page Object",
             "scenario": ai_context["scenario_name"],
             "mappings": ai_context["buffer"]
         }
 
         try:
+            # Use the SparkAssist utility we updated with the signature scanner
             spark = SparkAssist()
             generated_code = spark.generate_page_object(payload)
 
-            # Save generated code to a file
+            # Define output directory and file path
             output_dir = "generated_pages"
             os.makedirs(output_dir, exist_ok=True)
-            file_name = f"{output_dir}/{scenario.name.replace(' ', '_').lower()}.py"
 
-            with open(file_name, "w") as f:
+            # Sanitize file name
+            clean_name = scenario.name.replace(' ', '_').replace('-', '_').lower()
+            file_path = os.path.join(output_dir, f"{clean_name}.py")
+
+            with open(file_path, "w") as f:
                 f.write(generated_code)
 
-            print(f"✅ AI Page Object created: {file_name}")
+            print(f"✅ SUCCESS: Page Object saved to {file_path}")
+
         except Exception as e:
-            print(f"❌ Spark Assist Failed: {e}")
+            print(f"❌ Spark Assist Call Failed: {e}")
 
 
 # --- Reporting Hooks (Existing Logic) ---
