@@ -8,7 +8,7 @@ from thefuzz import fuzz
 class AIAutomationFramework:
     def __init__(self, driver):
         self.driver = driver
-        # Increased weights for ARIA and Placeholder for modern web stability
+        # Refined weights for modern web apps
         self.WEIGHTS = {
             'id': 1.0,
             'name': 0.9,
@@ -19,19 +19,19 @@ class AIAutomationFramework:
         self._nlp = None
 
     def _get_nlp(self):
-        """Lazy loads Spacy only when discovery is triggered to keep test runs fast."""
+        """Lazy loads Spacy model for performance."""
         if self._nlp is None:
             import spacy
             try:
                 self._nlp = spacy.load("en_core_web_md")
             except OSError:
-                print("--- 📥 Downloading NLP Model (First time only) ---")
+                print("--- 📥 Downloading NLP Model ---")
                 os.system("python -m spacy download en_core_web_md")
                 self._nlp = spacy.load("en_core_web_md")
         return self._nlp
 
     def highlight_element(self, loc):
-        """Visual Audit: Highlights the discovered element in the browser."""
+        """Visual Audit: Highlights the discovered element."""
         try:
             by_type = getattr(By, loc['strategy'].upper())
             element = self.driver.find_element(by_type, loc['value'])
@@ -44,20 +44,24 @@ class AIAutomationFramework:
             pass
 
     def _get_deep_elements(self):
-        """Scans the DOM including Shadow DOM roots."""
+        """Scans the DOM including Shadow DOM roots for interactive elements."""
         return self.driver.execute_script("""
             const foundElements = [];
             function findRecursive(root) {
-                const items = root.querySelectorAll('input, button, a, select, textarea, [role="button"]');
+                // Added [role] and [onclick] to the selector for better coverage
+                const items = root.querySelectorAll('input, button, a, select, textarea, [role], [onclick]');
                 items.forEach(el => {
                     const s = window.getComputedStyle(el);
                     if (el.offsetWidth > 0 && el.offsetHeight > 0 && s.display !== 'none') {
                         foundElements.push({
-                            'tag': el.tagName.toLowerCase(), 'id': el.id, 'name': el.name,
-                            'placeholder': el.placeholder || "", 'text': el.innerText || "",
+                            'tag': el.tagName.toLowerCase(), 
+                            'id': el.id, 
+                            'name': el.name,
+                            'placeholder': el.placeholder || "", 
+                            'text': el.innerText.trim() || "",
                             'aria': el.getAttribute('aria-label') || "",
-                            'canAcceptInput': ['input', 'textarea'].includes(el.tagName.toLowerCase()),
-                            'isClickable': ['button', 'a'].includes(el.tagName.toLowerCase()) || s.cursor === 'pointer'
+                            'role': el.getAttribute('role') || "", // Added Role
+                            'type': el.type || ""
                         });
                     }
                     if (el.shadowRoot) findRecursive(el.shadowRoot);
@@ -68,125 +72,97 @@ class AIAutomationFramework:
         """)
 
     def _is_unique(self, locator):
-        """Verifies if a locator returns exactly one element on the live DOM."""
+        """Ensures the locator points to exactly one element."""
         try:
             by_type = getattr(By, locator['strategy'].upper())
-            count = len(self.driver.find_elements(by_type, locator['value']))
-            return count == 1
+            return len(self.driver.find_elements(by_type, locator['value'])) == 1
         except:
             return False
 
     def _find_locator_weighted(self, context_text):
-        """Weighted Algorithm with Uniqueness Validation."""
+        """Core algorithm: NLP + Fuzzy matching to find the best unique locator."""
         nlp = self._get_nlp()
         elements = self._get_deep_elements()
         user_doc = nlp(context_text.lower())
-        matches = []
 
+        matches = []
         for el in elements:
+            # Create a string representation of the element for NLP comparison
             identity = f"{el['tag']} {el['id']} {el['name']} {el['placeholder']} {el['aria']} {el['text']}".lower()
             sim = user_doc.similarity(nlp(identity))
+
+            # Fuzzy match specific attributes
             attr_score = sum(fuzz.partial_ratio(context_text.lower(), str(el.get(k, ""))) * v
                              for k, v in self.WEIGHTS.items() if el.get(k))
+
             matches.append({"total": attr_score * sim, "element": el})
 
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        # Validation Loop: Find the best UNIQUE locator
+        # Validation: Return the first unique candidate
         for match in matches[:5]:
             el = match['element']
             candidates = []
             if el['id']: candidates.append({"strategy": "id", "value": el['id']})
             if el['name']: candidates.append({"strategy": "name", "value": el['name']})
-            # Default to specific text-based XPath if ID/Name fail
-            candidates.append(
-                {"strategy": "xpath", "value": f"//{el['tag']}[contains(normalize-space(.),'{el['text'][:15]}')]"})
+            if el['placeholder']: candidates.append(
+                {"strategy": "css_selector", "value": f"[placeholder='{el['placeholder']}']"})
+
+            # Fallback to smart XPath
+            if el['text']:
+                clean_text = el['text'][:20].replace("'", "")
+                candidates.append({"strategy": "xpath", "value": f"//{el['tag']}[contains(text(),'{clean_text}')]"})
 
             for cand in candidates:
                 if self._is_unique(cand):
                     return cand
         return None
 
-    def discover_composite_logic(self, step_text):
+    def get_step_metadata(self, step_text):
         """
-        Universal Discovery Engine:
-        1. Identifies if the [ai] trigger is present.
-        2. Cleans the text for NLP analysis.
-        3. Supports both Parameterized steps and Simple action steps.
-        4. Generates a unique Page Object method with proper Selenium actions.
+        Interprets the Gherkin step and returns structured data for Spark Assist.
         """
-        # 1. Activation Gate
         if "[ai]" not in step_text.lower():
-            return None
+            return []
 
-        # 2. Text Sanitization (Remove [ai] so it doesn't skew NLP similarity)
-        clean_text = step_text.replace("[ai]", "").replace("  ", " ").strip()
+        clean_text = step_text.replace("[ai]", "").strip()
 
-        # 3. Parameter Extraction (Supports "hardcoded" and <placeholders>)
+        # Extract params: "venu@gmail.com" or <username>
         params = re.findall(r"['\"](.*?)['\"]|<(.*?)>", clean_text)
-        param_names = [p[0] if p[0] else p[1] for p in params]
+        param_values = [p[0] if p[0] else p[1] for p in params]
 
-        mappings = []
+        results = []
 
-        # --- LOGIC BRANCHING ---
-        if param_names:
-            # BRANCH A: Multiple or Single Parameters (Type Action)
-            raw_intents = re.split(r"['\"].*?['\"]|<.*?>", clean_text.lower())
-            for i, p_name in enumerate(param_names):
-                intent = raw_intents[i].strip()
-                # Borrow context if intent is too short (e.g., "and <city>")
-                if len(intent) < 3 and i > 0:
-                    intent = f"{raw_intents[i - 1]} {intent}"
-
-                # Remove BDD keywords
-                clean_intent = re.sub(r'^(given|when|then|and|but)\s+', '', intent)
-
-                loc = self._find_locator_weighted(clean_intent)
+        if param_values:
+            # Case: Step with parameters (likely a 'Type' action)
+            intents = re.split(r"['\"].*?['\"]|<.*?>", clean_text.lower())
+            for i, val in enumerate(param_values):
+                intent = re.sub(r'^(given|when|then|and|but)\s+', '', intents[i].strip())
+                loc = self._find_locator_weighted(intent)
                 if loc:
                     self.highlight_element(loc)
-                    # Use parameter name from BDD as the Python argument name
-                    arg_name = p_name.replace("-", "_").replace(" ", "_")
-                    mappings.append({
-                        "loc": loc,
-                        "arg": arg_name,
+                    results.append({
+                        "intent": intent,
                         "action": "wait_and_type",
-                        "intent": clean_intent
+                        "locator": loc,
+                        "test_data": val
                     })
         else:
-            # BRANCH B: No Parameters (Click/Interaction Action)
-            clean_intent = re.sub(r'^(given|when|then|and|but)\s+', '', clean_text.lower())
-            loc = self._find_locator_weighted(clean_intent)
+            # Case: Step without parameters (likely a 'Click' action)
+            intent = re.sub(r'^(given|when|then|and|but)\s+', '', clean_text.lower())
+            loc = self._find_locator_weighted(intent)
             if loc:
                 self.highlight_element(loc)
-                mappings.append({
-                    "loc": loc,
-                    "arg": None,
+                results.append({
+                    "intent": intent,
                     "action": "wait_and_click",
-                    "intent": clean_intent
+                    "locator": loc,
+                    "test_data": None
                 })
 
-        # --- 4. Validation & Evidence ---
-        if not mappings:
-            return f"# AI Error: Could not find UI elements for intent: {clean_text}"
+        # Visual Audit
+        if results:
+            os.makedirs("logs", exist_ok=True)
+            self.driver.save_screenshot(f"logs/AI_Audit_{int(time.time())}.png")
 
-        # Create logs directory and capture visual audit
-        if not os.path.exists("logs"): os.makedirs("logs")
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        self.driver.save_screenshot(f"logs/AI_Map_{timestamp}.png")
-
-        # --- 5. Python Code Generation ---
-        # Create a PEP8 compliant method name from the first few words of the step
-        method_base = "_".join(re.sub(r"['\"].*?['\"]|<.*?>", "", clean_text).lower().split()[:3])
-
-        # Filter out None values for arguments (clicks don't have args)
-        args_list = ["self"] + [m['arg'] for m in mappings if m['arg']]
-        args_str = ", ".join(args_list)
-
-        code = [f"    def {method_base}({args_str}):"]
-        for m in mappings:
-            strategy = m['loc']['strategy'].upper()
-            val_part = f", {m['arg']}" if m['arg'] else ""
-            code.append(f"        # Action for: '{m['intent']}'")
-            code.append(f"        self.{m['action']}((By.{strategy}, '{m['loc']['value']}'){val_part})")
-
-        return "\n".join(code)
+        return results

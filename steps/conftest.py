@@ -1,12 +1,13 @@
 import re
 import smtplib
 import time
+import os
+import pytest
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-
-import pytest
 from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
+from utilities.spark_assist import SparkAssist  # Assuming this exists
 
 # --- Global State ---
 test_results = {}
@@ -14,18 +15,12 @@ test_results = {}
 
 # --- Pytest Configuration & Options ---
 def pytest_addoption(parser):
-    """Adds the --generate flag to your pytest command."""
-    parser.addoption(
-        "--generate",
-        action="store_true",
-        help="Run AI discovery for tagged steps"
-    )
+    parser.addoption("--generate", action="store_true", help="Run AI discovery for tagged steps")
 
 
 # --- Fixtures ---
 @pytest.fixture()
 def setup(request):
-    """Initializes the Chrome WebDriver."""
     driver = webdriver.Chrome()
     driver.maximize_window()
     yield {'driver': driver}
@@ -33,52 +28,88 @@ def setup(request):
 
 
 @pytest.fixture(scope="function")
-def ai_utility(driver):
-    """Fixture to provide the AI utility to hooks or tests."""
-    return AIAutomationFramework(driver)
+def ai_context():
+    """State manager for the current scenario's AI data."""
+    return {
+        "prompt": "",
+        "buffer": [],
+        "scenario_name": ""
+    }
 
 
-# --- Hooks: Test Reporting & Interception ---
+# --- Hooks: BDD Orchestration ---
+
+def pytest_bdd_before_scenario(request, feature, scenario, ai_context):
+    """Extracts the # prompt from the feature file before scenario starts."""
+    if "ai_prompt" in scenario.tags:
+        ai_context["scenario_name"] = scenario.name
+        try:
+            with open(feature.filename, 'r') as f:
+                content = f.read()
+                # Matches the comment directly above the @ai_prompt tag
+                match = re.search(r'#(.*)\n\s*@ai_prompt', content)
+                if match:
+                    ai_context["prompt"] = match.group(1).strip()
+        except Exception as e:
+            print(f"⚠️ Error reading feature metadata: {e}")
+
+
+def pytest_bdd_after_step(request, feature, scenario, step, step_func, ai_context):
+    """Intercepts [AI] steps and buffers locator data from the engine."""
+    if request.config.getoption("--generate") and "[ai]" in step.name.lower():
+        # Get driver from the 'setup' fixture (dictionary)
+        setup_data = request.getfixturevalue("setup")
+        driver = setup_data['driver']
+
+        # Initialize Engine and Discover Metadata (Structured Data)
+        ai_engine = AIAutomationFramework(driver)
+        step_metadata = ai_engine.get_step_metadata(step.name)
+
+        if step_metadata:
+            ai_context["buffer"].extend(step_metadata)
+            print(f"✔ [AI] Cached {len(step_metadata)} elements for step: {step.name}")
+
+
+def pytest_bdd_after_scenario(request, feature, scenario, ai_context):
+    """Sends buffered data to Spark Assist for code generation."""
+    if "ai_prompt" in scenario.tags and ai_context["buffer"]:
+        print(f"\n--- ⚡ Connecting to Spark Assist for Scenario: {scenario.name} ---")
+
+        payload = {
+            "instruction": ai_context["prompt"],
+            "scenario": ai_context["scenario_name"],
+            "mappings": ai_context["buffer"]
+        }
+
+        try:
+            spark = SparkAssist()
+            generated_code = spark.generate_page_object(payload)
+
+            # Save generated code to a file
+            output_dir = "generated_pages"
+            os.makedirs(output_dir, exist_ok=True)
+            file_name = f"{output_dir}/{scenario.name.replace(' ', '_').lower()}.py"
+
+            with open(file_name, "w") as f:
+                f.write(generated_code)
+
+            print(f"✅ AI Page Object created: {file_name}")
+        except Exception as e:
+            print(f"❌ Spark Assist Failed: {e}")
+
+
+# --- Reporting Hooks (Existing Logic) ---
+
 def pytest_runtest_makereport(item, call):
-    """Captures test results and durations for reporting."""
     if call.when == 'call':
-        # Extract test case ID from the test name (e.g., test_login__123)
         pattern = re.compile(r"__(\d+)$")
         match = pattern.search(item.name)
-
         if match:
             test_case_id = match.group(1)
-            outcome = 'Fail' if call.excinfo is not None else 'Pass'
-
             test_results[test_case_id] = {
-                'outcome': outcome,
+                'outcome': 'Fail' if call.excinfo is not None else 'Pass',
                 'duration': call.stop - call.start
             }
-
-
-def pytest_bdd_before_step(request, feature, scenario, step, step_func):
-    """
-    The Nervous System: Intercepts the step before it executes.
-    If --generate is on and [ai] is in the step name, it triggers discovery.
-    """
-    if request.config.getoption("--generate") and "[ai]" in step.name.lower():
-        print(f"\n🤖 [AI INTERCEPTOR] Discovery triggered for: {step.name}")
-
-        # 1. Grab the active driver session from your fixtures
-        driver = request.getfixturevalue("driver")
-
-        # 2. Initialize the AI Brain
-        ai = AIAutomationFramework(driver)
-
-        # 3. Discover the logic and get the code
-        generated_code = ai.discover_composite_logic(step.name)
-
-        # 4. Print it clearly to the terminal for copy-pasting
-        print("\n" + "🚀" + "=" * 60)
-        print("PASTE THIS INTO YOUR PAGE OBJECT CLASS:")
-        print("-" * 60)
-        print(generated_code)
-        print("=" * 62 + "\n")
 
 
 # --- Session Finish: Report Generation & Email ---
