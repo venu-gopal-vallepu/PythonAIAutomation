@@ -8,67 +8,61 @@ class SparkAssist:
         # Configuration - Use environment variables for security
         self.api_url = os.getenv("SPARK_API_URL", "https://your-spark-instance.ai/v1/chat")
         self.api_key = os.getenv("SPARK_API_KEY", "your_api_key_here")
-        # Ensure this path is correct relative to your project root
-        self.base_page_path = "feature/page/base_page.py"
 
-    def _get_base_page_signatures(self):
+    def _extract_interface_summary(self, source_code):
         """
-        Scans the local BasePage.py and extracts full method signatures
-        to tell the AI exactly how to call your methods.
+        Extracts method names and parameters from BasePage to guide Spark.
         """
-        if os.path.exists(self.base_page_path):
-            try:
-                with open(self.base_page_path, 'r') as f:
-                    content = f.read()
-                    # Regex to capture the method name and its parameters
-                    # e.g., 'enter_text(self, locator, text)'
-                    signatures = re.findall(r'def\s+([a-zA-Z_]\w*\s*\(.*?\)):', content)
+        if not source_code:
+            return "Available: click_element(loc), enter_text(loc, text), select_list_value_from_dropdown(loc, text)"
 
-                    # Filter out internal methods and constructor
-                    valid_signatures = [s for s in signatures if not s.startswith("_")]
+        pattern = r'def\s+([a-zA-Z_]\w*\(.*?\)):(?:\s+"""(.*?)""")?'
+        matches = re.findall(pattern, source_code, re.DOTALL)
 
-                    if valid_signatures:
-                        return f"The available methods in BasePage are: {', '.join(valid_signatures)}."
-            except Exception as e:
-                print(f"⚠️ Warning: Could not parse BasePage: {e}")
-
-        # Robust Fallback if file is missing or unreadable
-        return "The available methods in BasePage are: click_element(self, locator), enter_text(self, locator, text)."
+        summary = "AVAILABLE BASEPAGE METHODS (Use these signatures):\n"
+        for sig, doc in matches:
+            if not sig.startswith("__"):
+                summary += f"• {sig}\n"
+        return summary
 
     def generate_page_object(self, payload):
-        """
-        Orchestrates the context injection and calls Spark Assist to generate code.
-        """
-        # 1. Dynamically read the 'capabilities' of your BasePage
-        local_context = self._get_base_page_signatures()
+        base_source = payload.get('base_page_source', '')
+        mappings = payload.get('mappings', [])
+        scenario = payload.get('scenario', 'GeneratedPage').replace(" ", "")
+        is_append = payload.get('is_append', False)
 
-        # 2. Build the System Instruction (The Architect's Rules)
+        interface_map = self._extract_interface_summary(base_source)
+
+        # --- REFINED INSTRUCTIONS FOR LOCATORS & SIGNATURES ---
         system_instruction = (
-            f"You are a Senior Automation Architect. {local_context} "
-            "Your task is to generate a Python Page Object class based on UI mappings."
-            "\n\nSTRICT INSTRUCTIONS:\n"
-            "1. INHERITANCE: Inherit from 'BasePage'.\n"
-            "2. IMPORT: Use 'from feature.page.base_page import BasePage' and 'from selenium.webdriver.common.by import By'.\n"
-            "3. METHOD CALLS: Use the signatures provided above. If an action involves text input, use the method that accepts a 'text' argument.\n"
-            "4. LOCATORS: Format all locators as Selenium Tuples: (By.ID, 'value'), (By.XPATH, 'value'), etc.\n"
-            "5. OUTPUT: Return ONLY the raw Python code. No conversation, no markdown backticks."
+            "You are a Senior Automation Architect. Generate clean, PEP8 compliant Python code.\n\n"
+            f"{interface_map}\n"
+            "STRICT CODE STRUCTURE RULES:\n"
+            "1. INHERITANCE: Class must inherit from 'BasePage'.\n"
+            "2. IMPORTS: Use 'from feature.page.base_page import BasePage' and 'from selenium.webdriver.common.by import By'.\n"
+            "3. LOCATOR FORMAT: All locators MUST be private class-level tuples at the top of the class.\n"
+            "   Example: _username_txt = (By.ID, 'user-id')\n"
+            "4. METHOD NAMING: Use descriptive snake_case names based on the 'intent' field.\n"
+            "5. SIGNATURE MATCHING:\n"
+            "   - For 'wait_and_type' actions, use your BasePage method that accepts (locator, text).\n"
+            "   - For 'wait_and_select' on React/Div elements, use your custom dropdown method: select_list_value_from_dropdown(loc, text).\n"
+            "6. CLEANLINESS: Return ONLY the raw Python code. No conversation, no markdown, no backticks, no text explanations."
         )
 
-        # 3. Construct the Payload for the AI
         user_content = f"""
-        ### GOAL
-        {payload.get('instruction', 'Generate a Page Object.')}
+        TASK: Generate Page Object for '{scenario}'
+        IS_APPEND: {is_append} (If True, omit class definition and imports)
 
-        ### PAGE CLASS NAME
-        {payload.get('scenario', 'GeneratedPage')}
+        UI METADATA (Discovery Engine Results):
+        {mappings}
 
-        ### UI ELEMENT METADATA
-        {payload.get('mappings', [])}
+        DATA HANDLING:
+        - If test_data is <parameter>, treat as a method argument.
+        - If test_data is "hardcoded", use the string directly in the method call.
         """
 
-        # 4. Execute the API Request
         try:
-            print(f"--- 📡 Connecting to Spark Assist for: {payload.get('scenario')} ---")
+            print(f"--- 📡 Generating Page Object for: {scenario} ---")
 
             response = requests.post(
                 self.api_url,
@@ -79,7 +73,7 @@ class SparkAssist:
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_content}
                     ],
-                    "temperature": 0.1  # Low creativity for high-precision code
+                    "temperature": 0.1
                 },
                 timeout=60
             )
@@ -87,11 +81,8 @@ class SparkAssist:
             response.raise_for_status()
             result_code = response.json()['choices'][0]['message']['content']
 
-            # Final cleaning of the code block
-            clean_code = re.sub(r'```python|```', '', result_code).strip()
-            return clean_code
+            # Ensure any accidental AI-generated markdown is removed
+            return re.sub(r'```python|```', '', result_code).strip()
 
         except Exception as e:
-            error_msg = f"# ❌ Error in Spark Generation: {str(e)}"
-            print(error_msg)
-            return error_msg
+            return f"# ❌ Error in Spark Generation: {str(e)}"
