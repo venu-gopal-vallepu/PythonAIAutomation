@@ -1,19 +1,16 @@
 import os
 import pytest
 import re
-import smtplib
-import time
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
 from utilities.spark_assist import SparkAssist
 
-# --- Global State for Reporting ---
+# --- Global State for Reporting and De-duplication ---
 test_results = {}
+processed_scenarios = set()  # Ensures Scenario Outlines only generate code ONCE
 
 
-# --- Pytest Configuration & Options ---
+# --- Pytest Configuration ---
 def pytest_addoption(parser):
     parser.addoption("--generate", action="store_true", help="Run AI discovery for tagged steps")
     parser.addoption("--page-file", action="store", default=None,
@@ -38,11 +35,7 @@ def ai_engine():
 @pytest.fixture(scope="function")
 def ai_context():
     """State manager for the current scenario's AI data."""
-    return {
-        "prompt": "",
-        "buffer": [],
-        "scenario_name": ""
-    }
+    return {"prompt": "", "buffer": [], "scenario_name": ""}
 
 
 # --- Hooks: BDD Orchestration ---
@@ -54,29 +47,46 @@ def pytest_bdd_before_scenario(request, feature, scenario):
         ai_ctx["scenario_name"] = scenario.name
         try:
             with open(feature.filename, 'r', encoding='utf-8') as f:
-                content = f.read()
-                match = re.search(r'#(.*)\n\s*@ai_prompt', content)
-                if match:
-                    ai_ctx["prompt"] = match.group(1).strip()
-                    print(f"\nℹ️ AI Prompt Loaded: {ai_ctx['prompt']}")
+                lines = f.readlines()
+
+            # 1. Locate the exact Scenario line index
+            scenario_idx = -1
+            for i, line in enumerate(lines):
+                if f"Scenario: {scenario.name}" in line or f"Scenario Outline: {scenario.name}" in line:
+                    scenario_idx = i
+                    break
+
+            if scenario_idx != -1:
+                prompt_lines = []
+                # 2. Search upwards to collect the multi-line prompt
+                # We stop when we hit the @ai_prompt tag
+                for j in range(scenario_idx - 1, -1, -1):
+                    curr = lines[j].strip()
+                    if "@ai_prompt" in curr:
+                        break
+
+                    # Clean the line: remove leading '#' if present, otherwise keep text
+                    clean_line = curr.lstrip('#').strip()
+                    if clean_line:
+                        prompt_lines.insert(0, clean_line)
+
+                ai_ctx["prompt"] = " ".join(prompt_lines)
+                print(f"\nℹ️ AI Prompt matched for [{scenario.name}]: {ai_ctx['prompt']}")
         except Exception as e:
             print(f"⚠️ Error reading feature metadata: {e}")
 
 
 @pytest.hookimpl
 def pytest_bdd_after_step(request, feature, scenario, step, step_func):
-    """Intercepts [AI] steps and extracts metadata from the RAW step text."""
     if request.config.getoption("--generate") and "[ai]" in step.name.lower():
         ai_ctx = request.getfixturevalue("ai_context")
         setup_data = request.getfixturevalue("setup")
         engine = request.getfixturevalue("ai_engine")
 
         engine.driver = setup_data['driver']
-
-        # In Pytest-BDD, step.name is the best source for the raw template string
         print(f"--- 🔍 AI Discovery: {step.name} ---")
-        step_metadata_list = engine.get_step_metadata(step.name)
 
+        step_metadata_list = engine.get_step_metadata(step.name)
         if step_metadata_list:
             ai_ctx["buffer"].extend(step_metadata_list)
             print(f"✔ [AI] Cached {len(step_metadata_list)} interactions.")
@@ -86,34 +96,37 @@ def pytest_bdd_after_step(request, feature, scenario, step, step_func):
 def pytest_bdd_after_scenario(request, feature, scenario):
     ai_ctx = request.getfixturevalue("ai_context")
 
-    if "ai_prompt" in scenario.tags and ai_ctx.get("buffer"):
+    # CONDITION: Only generate if --generate is passed AND we haven't done this scenario name yet
+    should_run = (
+            request.config.getoption("--generate") and
+            "ai_prompt" in scenario.tags and
+            ai_ctx.get("buffer") and
+            scenario.name not in processed_scenarios
+    )
+
+    if should_run:
         target_file = request.config.getoption("--page-file")
         output_dir = "feature/page"
         os.makedirs(output_dir, exist_ok=True)
 
-        # File Determination Logic
         clean_name = scenario.name.replace(' ', '_').replace('-', '_').lower()
         file_name = target_file if target_file else f"{clean_name}.py"
         file_path = os.path.join(output_dir, file_name)
         is_append = os.path.exists(file_path)
 
-        instruction = ai_ctx.get("prompt", "Generate Page Object methods")
-
-        # --- MODIFICATION: Read BasePage Source ---
+        # Provide BasePage source for signature matching
         base_source = ""
         try:
-            # Update path to your actual base_page.py
             with open("utilities/base_page.py", "r", encoding='utf-8') as bf:
                 base_source = bf.read()
-        except Exception as e:
-            print(f"⚠️ Warning: Could not read BasePage source: {e}")
+        except:
+            pass
 
         payload = {
-            "instruction": instruction,
+            "instruction": ai_ctx.get("prompt"),
             "scenario": scenario.name,
             "mappings": ai_ctx["buffer"],
-            "base_page_source": base_source,  # NEW: Provide the 'Library of Truth'
-            "format_preference": "SELENIUM_POM",
+            "base_page_source": base_source,
             "is_append": is_append
         }
 
@@ -122,39 +135,35 @@ def pytest_bdd_after_scenario(request, feature, scenario):
             generated_code = spark.generate_page_object(payload)
 
             if is_append:
-                indented_code = "\n".join([f"    {line}" if line.strip() else line
-                                           for line in generated_code.splitlines()])
+                # Add header and indent code to fit inside an existing class
+                header = f"\n\n    # --- Actions for: {scenario.name} ---\n"
+                indented = "\n".join([f"    {l}" if l.strip() else l for l in generated_code.splitlines()])
+                content = header + indented
                 mode = "a"
-                header = f"\n\n    # --- Actions for Scenario: {scenario.name} ---\n"
-                content_to_write = header + indented_code
             else:
+                content = generated_code
                 mode = "w"
-                content_to_write = generated_code
 
             with open(file_path, mode, encoding='utf-8') as f:
-                f.write(content_to_write)
+                f.write(content)
 
-            print(f"✅ Code written to {file_path}")
+            print(f"✅ Success: Code written for scenario [{scenario.name}]")
+            processed_scenarios.add(scenario.name)  # Mark as completed
 
         except Exception as e:
             print(f"❌ Spark Error: {e}")
         finally:
-            # --- MODIFICATION: Always clear buffer after scenario attempt ---
             ai_ctx["buffer"] = []
 
 
-# --- Existing Reporting Hooks ---
+# --- Reporting Hooks ---
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
     if report.when == 'call':
-        test_results[item.name] = {
-            'outcome': report.outcome,
-            'duration': report.duration
-        }
+        test_results[item.name] = {'outcome': report.outcome, 'duration': report.duration}
 
 
 def pytest_sessionfinish(session, exitstatus):
-    # (Preserve your existing Email logic here)
-    print("Test Session Finished.")
+    print("\n--- AI Generation Session Finished ---")
