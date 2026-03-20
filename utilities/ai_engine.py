@@ -32,6 +32,20 @@ class AIAutomationFramework:
                 self._nlp = spacy.load("en_core_web_md")
         return self._nlp
 
+    def clean_for_nlp(self, text):
+        """
+        Translates technical strings into human-readable words.
+        Example: 'txtUserName_01' -> 'txt User Name'
+        """
+        if not text:
+            return ""
+        # 1. Split CamelCase (e.g., UserName -> User Name)
+        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))
+        # 2. Replace underscores/hyphens with spaces
+        text = text.replace('_', ' ').replace('-', ' ')
+        # 3. Remove non-alphabetic characters and normalize
+        return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
+
     def highlight_with_labels(self, discovery_data, color="#2ecc71"):
         """Visual Audit: Draws glowing borders and floating labels simultaneously."""
         if not discovery_data: return
@@ -107,48 +121,41 @@ class AIAutomationFramework:
     def _find_locator_weighted(self, intent):
         """
         HYBRID ENGINE: Optimized for Scenario Outlines and technical IDs.
-        Uses NLP for meaning + Fuzzy for spelling + Vector Norm safety.
+        Uses NLP for meaning + Fuzzy for spelling + Vector Norm safety + CamelCase Cleaning.
         """
         nlp = self._get_nlp()
         elements = self._get_deep_elements()
 
-        # 1. Prepare User Intent
-        clean_intent = intent.lower().strip()
+        # 1. Prepare User Intent with Cleaning
+        clean_intent = self.clean_for_nlp(intent)
         user_doc = nlp(clean_intent)
 
         matches = []
         for el in elements:
             # 2. Extract Element Identity for Hybrid Scoring
-            # We bundle all attributes to give NLP/Fuzzy the best chance
-            identity_parts = [
-                str(el.get('id', '')),
-                str(el.get('name', '')),
-                str(el.get('placeholder', '')),
-                str(el.get('aria', '')),
-                str(el.get('text', ''))
-            ]
-            full_identity = " ".join(identity_parts).lower().strip()
-            target_doc = nlp(full_identity)
+            raw_identity = f"{el.get('id', '')} {el.get('name', '')} {el.get('placeholder', '')} {el.get('aria', '')} {el.get('text', '')}"
 
-            # 3. NLP SIMILARITY (The 'Brain')
-            # Check vector_norm to prevent 0.0 scores for words like 'longname'
+            # 3. Clean Identity (e.g., 'txtUserName' -> 'txt user name')
+            clean_identity = self.clean_for_nlp(raw_identity)
+            target_doc = nlp(clean_identity)
+
+            # 4. NLP SIMILARITY (The 'Brain')
             sim = 0.0
             if user_doc.vector_norm > 0 and target_doc.vector_norm > 0:
                 sim = user_doc.similarity(target_doc)
 
-            # 4. FUZZY MATCHING (The 'Eyes')
-            # partial_ratio is aggressive at finding 'longname' inside 'txt_longname_field'
-            fuzzy_score = fuzz.partial_ratio(clean_intent, full_identity)
+            # 5. FUZZY MATCHING (The 'Eyes')
+            fuzzy_score = fuzz.partial_ratio(clean_intent, clean_identity)
 
-            # 5. FINAL CALCULATION
-            # sim + 0.1 ensures that even if similarity is 0, fuzzy score carries the element
+            # 6. FINAL CALCULATION
+            # sim + 0.1 ensures fuzzy carries the day even if NLP word is unknown
             total_score = fuzzy_score * (sim + 0.1)
             matches.append({"total": total_score, "element": el})
 
         # Sort by highest score
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        # 6. TRY TOP 3 STRATEGIES
+        # 7. TRY TOP 3 STRATEGIES
         for match in matches[:3]:
             el = match['element']
             candidates = []
@@ -167,7 +174,7 @@ class AIAutomationFramework:
                 if element:
                     return element, cand
 
-        # 7. FAILSAFE: Selenium 4 Relative Locators
+        # 8. FAILSAFE: Selenium 4 Relative Locators
         for match in matches[:2]:
             el = match['element']
             try:
