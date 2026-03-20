@@ -2,7 +2,7 @@ import time
 import os
 from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
-from utilities.engine_runner import SparkAssistRunner
+# from utilities.engine_runner import SparkAssistRunner
 
 
 def run_accelerated_discovery():
@@ -16,7 +16,7 @@ def run_accelerated_discovery():
 
     # Initialize our AI components
     ai_engine = AIAutomationFramework(driver)
-    spark_runner = SparkAssistRunner()
+    # spark_runner = SparkAssistRunner()
 
     try:
         # Step 1: Manual Navigation
@@ -55,15 +55,15 @@ def run_accelerated_discovery():
             "mappings": all_mappings
         }
 
-        generated_code = spark_runner.generate_page_object(payload)
+        # generated_code = spark_runner.generate_page_object(payload)
 
         # Step 4: Save and Print
-        file_path = spark_runner.save_code(generated_code, "OrangeHRM_Login")
+        # file_path = spark_runner.save_code(generated_code, "OrangeHRM_Login")
 
         print("\n" + "🚀" * 10 + " POM CODE GENERATED " + "🚀" * 10)
-        print(f"Saved to: {file_path}")
-        print("-" * 60)
-        print(generated_code)
+        # print(f"Saved to: {file_path}")
+        # print("-" * 60)
+        # print(generated_code)
         print("-" * 60)
 
         print("\n💡 Check the 'logs' folder for visual audit screenshots.")

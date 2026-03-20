@@ -6,7 +6,7 @@ from utilities.ai_engine import AIAutomationFramework
 from utilities.spark_assist import SparkAssist
 
 # --- Global State for De-duplication ---
-# Ensures Scenario Outlines only call the AI once per scenario name
+# Prevents Scenario Outlines from generating code for every row (we only need the first row to discover locators)
 test_results = {}
 processed_scenarios = set()
 
@@ -29,13 +29,13 @@ def setup(request):
 
 @pytest.fixture(scope="session")
 def ai_engine():
-    """Persistent AI Engine to keep SpaCy loaded in memory."""
+    """Persistent AI Engine to keep NLP model loaded in memory across the session."""
     return AIAutomationFramework(None)
 
 
 @pytest.fixture(scope="function")
 def ai_context():
-    """State manager for the current scenario's AI data."""
+    """State manager for the current scenario's AI prompts and discovered metadata buffer."""
     return {"prompt": "", "buffer": [], "scenario_name": ""}
 
 
@@ -44,9 +44,8 @@ def ai_context():
 @pytest.hookimpl
 def pytest_bdd_before_scenario(request, feature, scenario):
     """
-    Finds the multi-line prompt for the current scenario.
-    Collects all text between @ai_prompt and the Scenario header,
-    even if only the first line has a '#'.
+    Reads the feature file to extract the multi-line # prompt block
+    located between the @ai_prompt tag and the Scenario header.
     """
     ai_ctx = request.getfixturevalue("ai_context")
     if "ai_prompt" in scenario.tags:
@@ -55,7 +54,7 @@ def pytest_bdd_before_scenario(request, feature, scenario):
             with open(feature.filename, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            # 1. Locate the exact Scenario line index
+            # 1. Locate the exact Scenario line index in the source file
             scenario_idx = -1
             for i, line in enumerate(lines):
                 if f"Scenario: {scenario.name}" in line or f"Scenario Outline: {scenario.name}" in line:
@@ -64,14 +63,12 @@ def pytest_bdd_before_scenario(request, feature, scenario):
 
             if scenario_idx != -1:
                 prompt_lines = []
-                # 2. Search upwards to collect the multi-line prompt block
+                # 2. Search upwards to collect the comment-based prompt
                 for j in range(scenario_idx - 1, -1, -1):
                     curr = lines[j].strip()
-                    # Stop if we hit the tag or another scenario
                     if "@ai_prompt" in curr:
                         break
-
-                    # Clean leading hashes if they exist, otherwise grab raw text
+                    # Clean leading hashes if they exist
                     clean_line = curr.lstrip('#').strip()
                     if clean_line:
                         prompt_lines.insert(0, clean_line)
@@ -85,21 +82,34 @@ def pytest_bdd_before_scenario(request, feature, scenario):
 @pytest.hookimpl
 def pytest_bdd_after_step(request, feature, scenario, step, step_func):
     """
-    Intercepts the step and passes the RAW text (template) to the engine.
-    This allows the engine to find multiple locators in a single string
-    by identifying anchors near <parameters> or "quotes".
+    Intercepts the step and passes the RAW text template (with <brackets>) to the engine.
+    This enables dynamic multi-parameter discovery in a single step line.
     """
-    if request.config.getoption("--generate") and "[ai]" in step.name.lower():
+    # Only run discovery if the --generate flag is passed and step contains [ai]
+    if "[ai]" in step.name.lower():
         ai_ctx = request.getfixturevalue("ai_context")
         setup_data = request.getfixturevalue("setup")
         engine = request.getfixturevalue("ai_engine")
 
         engine.driver = setup_data['driver']
 
-        # step.name contains the raw template (e.g., enters username <user>)
-        print(f"--- 🔍 AI Discovery (Raw Step): {step.name} ---")
+        # --- RAW TEMPLATE EXTRACTION (Pytest 9.0.2 / BDD 8.x) ---
+        # Instead of 'step.name' (which has values), we find the original Gherkin line
+        try:
+            scenario_name = scenario.name
+            template = feature.scenarios[scenario_name]
+            raw_step_text = next(
+                (s.name for s in template._steps if s.line_number == step.line_number),
+                step.name  # Fallback to rendered name if template lookup fails
+            )
+        except Exception:
+            raw_step_text = step.name
 
-        step_metadata_list = engine.get_step_metadata(step.name)
+        print(f"--- 🔍 AI Discovery (Raw Template): {raw_step_text} ---")
+
+        # Get metadata for all parameters found in the raw text
+        step_metadata_list = engine.get_step_metadata(raw_step_text)
+
         if step_metadata_list:
             ai_ctx["buffer"].extend(step_metadata_list)
             print(f"✔ [AI] Cached {len(step_metadata_list)} interaction(s).")
@@ -108,8 +118,7 @@ def pytest_bdd_after_step(request, feature, scenario, step, step_func):
 @pytest.hookimpl
 def pytest_bdd_after_scenario(request, feature, scenario):
     """
-    Sends the gathered metadata to Spark Assist to generate the Page Object.
-    Uses the 'Duplicate Guard' to skip subsequent rows in Scenario Outlines.
+    Collects the buffer and triggers Spark Assist to generate the Page Object code.
     """
     ai_ctx = request.getfixturevalue("ai_context")
 
@@ -130,7 +139,7 @@ def pytest_bdd_after_scenario(request, feature, scenario):
         file_path = os.path.join(output_dir, file_name)
         is_append = os.path.exists(file_path)
 
-        # Extract BasePage source for context
+        # Extract BasePage source for context to help Spark Assist write better code
         base_source = ""
         try:
             with open("utilities/base_page.py", "r", encoding='utf-8') as bf:
@@ -151,7 +160,7 @@ def pytest_bdd_after_scenario(request, feature, scenario):
             generated_code = spark.generate_page_object(payload)
 
             if is_append:
-                # Append mode: add header and indent code to stay within the class scope
+                # Add header and indent code for class scope
                 header = f"\n\n    # --- Actions for: {scenario.name} ---\n"
                 indented = "\n".join([f"    {l}" if l.strip() else l for l in generated_code.splitlines()])
                 content = header + indented
@@ -163,8 +172,8 @@ def pytest_bdd_after_scenario(request, feature, scenario):
             with open(file_path, mode, encoding='utf-8') as f:
                 f.write(content)
 
-            print(f"✅ Success: Code written to {file_path}")
-            processed_scenarios.add(scenario.name)  # Mark as done
+            print(f"✅ Success: Page Object logic written to {file_path}")
+            processed_scenarios.add(scenario.name)  # Mark scenario as processed
 
         except Exception as e:
             print(f"❌ Spark Error: {e}")
