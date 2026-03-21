@@ -5,22 +5,23 @@ from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
 from utilities.spark_assist import SparkAssist
 
-# --- Global State for De-duplication ---
-# Prevents Scenario Outlines from generating code for every row (we only need the first row to discover locators)
-test_results = {}
+# --- Global State Management ---
+# Ensures we don't double-generate code for Scenario Outlines/Data-driven rows
 processed_scenarios = set()
 
 
 # --- Pytest Configuration ---
 def pytest_addoption(parser):
+    """Adds command-line flags for the AI Generator."""
     parser.addoption("--generate", action="store_true", help="Run AI discovery for tagged steps")
     parser.addoption("--page-file", action="store", default=None,
-                     help="Target file name in feature/page/ to append or create")
+                     help="Target filename (e.g., login_page.py) to create or append")
 
 
 # --- Fixtures ---
 @pytest.fixture()
 def setup(request):
+    """Standard WebDriver initialization."""
     driver = webdriver.Chrome()
     driver.maximize_window()
     yield {'driver': driver}
@@ -29,14 +30,14 @@ def setup(request):
 
 @pytest.fixture(scope="session")
 def ai_engine():
-    """Persistent AI Engine to keep NLP model loaded in memory across the session."""
+    """Persistent AI Engine: Keeps the Spacy NLP model in memory for the whole run."""
     return AIAutomationFramework(None)
 
 
 @pytest.fixture(scope="function")
 def ai_context():
-    """State manager for the current scenario's AI prompts and discovered metadata buffer."""
-    return {"prompt": "", "buffer": [], "scenario_name": ""}
+    """Temporary storage for a single scenario's prompt and discovered locators."""
+    return {"prompt": "", "buffer": {}, "scenario_name": ""}
 
 
 # --- Hooks: BDD Orchestration ---
@@ -44,8 +45,7 @@ def ai_context():
 @pytest.hookimpl
 def pytest_bdd_before_scenario(request, feature, scenario):
     """
-    Reads the feature file to extract the multi-line # prompt block
-    located between the @ai_prompt tag and the Scenario header.
+    Extracts the # comment-based prompt block above the @ai_prompt tag.
     """
     ai_ctx = request.getfixturevalue("ai_context")
     if "ai_prompt" in scenario.tags:
@@ -54,92 +54,77 @@ def pytest_bdd_before_scenario(request, feature, scenario):
             with open(feature.filename, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            # 1. Locate the exact Scenario line index in the source file
-            scenario_idx = -1
-            for i, line in enumerate(lines):
-                if f"Scenario: {scenario.name}" in line or f"Scenario Outline: {scenario.name}" in line:
-                    scenario_idx = i
-                    break
+            # Find where the scenario starts in the file
+            idx = next((i for i, line in enumerate(lines)
+                        if f"Scenario: {scenario.name}" in line
+                        or f"Scenario Outline: {scenario.name}" in line), -1)
 
-            if scenario_idx != -1:
+            if idx != -1:
                 prompt_lines = []
-                # 2. Search upwards to collect the comment-based prompt
-                for j in range(scenario_idx - 1, -1, -1):
-                    curr = lines[j].strip()
-                    if "@ai_prompt" in curr:
-                        break
-                    # Clean leading hashes if they exist
-                    clean_line = curr.lstrip('#').strip()
-                    if clean_line:
-                        prompt_lines.insert(0, clean_line)
+                # Scan upwards from the scenario header to find the prompt
+                for j in range(idx - 1, -1, -1):
+                    line = lines[j].strip()
+                    if "@ai_prompt" in line: break
+                    clean = line.lstrip('#').strip()
+                    if clean: prompt_lines.insert(0, clean)
 
                 ai_ctx["prompt"] = " ".join(prompt_lines)
-                print(f"\nℹ️ AI Prompt matched for [{scenario.name}]: {ai_ctx['prompt']}")
+                print(f"\n[AI-PROMPT] Context Loaded: {ai_ctx['prompt']}")
         except Exception as e:
-            print(f"⚠️ Error reading feature metadata: {e}")
+            print(f"⚠️ Error reading feature file prompt: {e}")
 
 
 @pytest.hookimpl
 def pytest_bdd_after_step(request, feature, scenario, step, step_func):
     """
-    Intercepts the step and passes the RAW text template (with <brackets>) to the engine.
-    This enables dynamic multi-parameter discovery in a single step line.
+    The Discovery Hook: Intercepts [ai] steps and scrapes React metadata.
     """
-    # Only run discovery if the --generate flag is passed and step contains [ai]
-    if "[ai]" in step.name.lower():
+    if "[ai]" in step.name.lower() and request.config.getoption("--generate"):
         ai_ctx = request.getfixturevalue("ai_context")
         setup_data = request.getfixturevalue("setup")
         engine = request.getfixturevalue("ai_engine")
 
         engine.driver = setup_data['driver']
 
-        # --- RAW TEMPLATE EXTRACTION (Pytest 9.0.2 / BDD 8.x) ---
-        # Instead of 'step.name' (which has values), we find the original Gherkin line
+        # Get the raw Gherkin template (e.g. 'I enter <username>')
         try:
-            scenario_name = scenario.name
-            template = feature.scenarios[scenario_name]
-            raw_step_text = next(
-                (s.name for s in template._steps if s.line_number == step.line_number),
-                step.name  # Fallback to rendered name if template lookup fails
-            )
-        except Exception:
-            raw_step_text = step.name
+            raw_text = step.template if hasattr(step, 'template') else step.name
+        except:
+            raw_text = step.name
 
-        print(f"--- 🔍 AI Discovery (Raw Template): {raw_step_text} ---")
+        print(f"--- 🔍 AI Scanning: {raw_text} ---")
+        metadata_list = engine.get_step_metadata(raw_text)
 
-        # Get metadata for all parameters found in the raw text
-        step_metadata_list = engine.get_step_metadata(raw_step_text)
-
-        if step_metadata_list:
-            ai_ctx["buffer"].extend(step_metadata_list)
-            print(f"✔ [AI] Cached {len(step_metadata_list)} interaction(s).")
+        if metadata_list:
+            # De-duplicate by 'intent' to keep the Page Object clean
+            for meta in metadata_list:
+                ai_ctx["buffer"][meta['intent']] = meta
+            print(f"✔ [AI] Cached elements: {list(ai_ctx['buffer'].keys())}")
 
 
 @pytest.hookimpl
 def pytest_bdd_after_scenario(request, feature, scenario):
     """
-    Collects the buffer and triggers Spark Assist to generate the Page Object code.
+    The Assembler: Sends the de-duplicated buffer to SparkAssist for POM generation.
     """
     ai_ctx = request.getfixturevalue("ai_context")
 
-    should_run = (
-            request.config.getoption("--generate") and
-            "ai_prompt" in scenario.tags and
-            ai_ctx.get("buffer") and
-            scenario.name not in processed_scenarios
-    )
+    # Validation: Should we trigger Spark?
+    is_gen_mode = request.config.getoption("--generate")
+    has_ai_tag = "ai_prompt" in scenario.tags
+    is_new = scenario.name not in processed_scenarios
 
-    if should_run:
-        target_file = request.config.getoption("--page-file")
+    if is_gen_mode and has_ai_tag and ai_ctx["buffer"] and is_new:
         output_dir = "feature/page"
         os.makedirs(output_dir, exist_ok=True)
 
-        clean_name = scenario.name.replace(' ', '_').replace('-', '_').lower()
-        file_name = target_file if target_file else f"{clean_name}.py"
+        # File Naming Logic
+        target_arg = request.config.getoption("--page-file")
+        file_name = target_arg if target_arg else f"{scenario.name.replace(' ', '_').lower()}.py"
         file_path = os.path.join(output_dir, file_name)
         is_append = os.path.exists(file_path)
 
-        # Extract BasePage source for context to help Spark Assist write better code
+        # Provide BasePage context so Spark matches your method names
         base_source = ""
         try:
             with open("utilities/base_page.py", "r", encoding='utf-8') as bf:
@@ -147,48 +132,33 @@ def pytest_bdd_after_scenario(request, feature, scenario):
         except:
             pass
 
-        payload = {
-            "instruction": ai_ctx.get("prompt"),
+        spark = SparkAssist()
+        generated_code = spark.generate_page_object({
             "scenario": scenario.name,
-            "mappings": ai_ctx["buffer"],
+            "mappings": list(ai_ctx["buffer"].values()),
             "base_page_source": base_source,
             "is_append": is_append
-        }
+        })
 
         try:
-            spark = SparkAssist()
-            generated_code = spark.generate_page_object(payload)
-
             if is_append:
-                # Add header and indent code for class scope
+                # Append with a header and proper Python indentation (4 spaces)
                 header = f"\n\n    # --- Actions for: {scenario.name} ---\n"
                 indented = "\n".join([f"    {l}" if l.strip() else l for l in generated_code.splitlines()])
                 content = header + indented
-                mode = "a"
             else:
                 content = generated_code
-                mode = "w"
 
-            with open(file_path, mode, encoding='utf-8') as f:
+            with open(file_path, "a" if is_append else "w", encoding='utf-8') as f:
                 f.write(content)
 
-            print(f"✅ Success: Page Object logic written to {file_path}")
-            processed_scenarios.add(scenario.name)  # Mark scenario as processed
-
+            print(f"✅ PRODUCT-READY POM UPDATED: {file_path}")
+            processed_scenarios.add(scenario.name)
         except Exception as e:
-            print(f"❌ Spark Error: {e}")
+            print(f"❌ Write Error: {e}")
         finally:
-            ai_ctx["buffer"] = []
-
-
-# --- Reporting Hooks ---
-@pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    outcome = yield
-    report = outcome.get_result()
-    if report.when == 'call':
-        test_results[item.name] = {'outcome': report.outcome, 'duration': report.duration}
+            ai_ctx["buffer"] = {}  # Clear for the next scenario in the session
 
 
 def pytest_sessionfinish(session, exitstatus):
-    print("\n--- AI Generation Session Finished ---")
+    print("\n--- 🚀 AI Generation Session Complete ---")

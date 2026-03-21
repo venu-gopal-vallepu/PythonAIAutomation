@@ -1,12 +1,10 @@
 import os
 import re
 import time
+import json
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.relative_locator import locate_with
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from thefuzz import fuzz
 
 
@@ -14,10 +12,15 @@ class AIAutomationFramework:
     def __init__(self, driver, timeout=10):
         self.driver = driver
         self.timeout = timeout
-        # STRATEGIC WEIGHTS: Prioritizes technical IDs over generic text
+        # STABILITY-FIRST WEIGHTS: React IDs are penalized; data-testids are King.
         self.WEIGHTS = {
-            'id': 1.0, 'name': 0.9, 'aria-label': 1.0,
-            'placeholder': 0.9, 'role': 0.8, 'text': 0.7
+            'data-testid': 1.0,
+            'aria-label': 0.9,
+            'role': 0.8,
+            'placeholder': 0.7,
+            'text_intent': 0.6,
+            'name': 0.4,
+            'id': 0.1  # Penalized because React IDs are often dynamic/generated
         }
         self._nlp = None
 
@@ -27,58 +30,70 @@ class AIAutomationFramework:
             try:
                 self._nlp = spacy.load("en_core_web_md")
             except OSError:
+                print("Downloading NLP Model (Organization Standard Requirement)...")
                 os.system("python -m spacy download en_core_web_md")
                 self._nlp = spacy.load("en_core_web_md")
         return self._nlp
 
     def clean_for_nlp(self, text):
-        """Processes 'txtUserName' into 'txt user name' for AI understanding."""
         if not text: return ""
-        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))  # CamelCase split
-        text = text.replace('_', ' ').replace('-', ' ')  # Symbol split
+        # Handle CamelCase, underscores, and dashes
+        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))
+        text = text.replace('_', ' ').replace('-', ' ')
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
 
     def _get_deep_elements(self):
-        """Scans DOM and Shadow DOM for all interactive candidates."""
+        """
+        SCRIPTS: Captures UI metadata.
+        Note: Includes logic to detect if an ID looks auto-generated (React/MUI).
+        """
         return self.driver.execute_script("""
-            const foundElements = [];
-            function findRecursive(root) {
-                const items = root.querySelectorAll('input, button, a, select, textarea, [role], [onclick], .btn, .link');
-                items.forEach(el => {
-                    const s = window.getComputedStyle(el);
-                    if (el.offsetWidth > 0 && el.offsetHeight > 0 && s.display !== 'none' && s.visibility !== 'hidden') {
-                        foundElements.push({
-                            'tag': el.tagName.toLowerCase(), 
-                            'id': el.id || "", 
-                            'name': el.name || "",
-                            'placeholder': el.placeholder || "", 
-                            'text': el.innerText.trim() || "",
-                            'aria': el.getAttribute('aria-label') || el.getAttribute('title') || "",
-                            'role': el.getAttribute('role') || "",
-                            'type': el.type || ""
-                        });
+            const getXPath = (el) => {
+                if (el.id && !/^(mui-|id-|:r)/.test(el.id)) return `//*[@id="${el.id}"]`;
+                const paths = [];
+                for (; el && el.nodeType === 1; el = el.parentNode) {
+                    let index = 0;
+                    for (let sib = el.previousSibling; sib; sib = sib.previousSibling) {
+                        if (sib.nodeType === 1 && sib.tagName === el.tagName) index++;
                     }
-                    if (el.shadowRoot) findRecursive(el.shadowRoot);
-                });
-            }
-            findRecursive(document);
-            return foundElements;
+                    const tagName = el.tagName.toLowerCase();
+                    const pathIndex = index > 0 ? `[${index + 1}]` : "";
+                    paths.unshift(tagName + pathIndex);
+                }
+                return paths.length ? "/" + paths.join("/") : null;
+            };
+
+            const results = [];
+            const query = 'input, button, select, [role="combobox"], [role="radio"], [role="checkbox"], [data-testid]';
+            document.querySelectorAll(query).forEach(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    // Label Discovery Logic
+                    let label = "";
+                    if (el.id) {
+                        const l = document.querySelector(`label[for="${el.id}"]`);
+                        label = l ? l.innerText : "";
+                    }
+                    if (!label) {
+                        label = el.closest('div')?.innerText.split('\\n')[0] || el.placeholder || "";
+                    }
+
+                    results.push({
+                        'tag': el.tagName.toLowerCase(),
+                        'id': el.id || "",
+                        'data-testid': el.getAttribute('data-testid') || "",
+                        'aria': el.getAttribute('aria-label') || el.getAttribute('title') || "",
+                        'role': el.getAttribute('role') || "",
+                        'placeholder': el.placeholder || "",
+                        'text_intent': label.trim(),
+                        'xpath': getXPath(el)
+                    });
+                }
+            });
+            return results;
         """)
 
-    def _safe_find_unique(self, strategy, value):
-        """Finds, scrolls to, and returns a unique visible element."""
-        try:
-            wait = WebDriverWait(self.driver, self.timeout)
-            by_type = getattr(By, strategy.upper())
-            element = wait.until(EC.element_to_be_clickable((by_type, value)))
-            # Ensure it's in view
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-            return element if len(self.driver.find_elements(by_type, value)) == 1 else None
-        except:
-            return None
-
     def _find_locator_weighted(self, intent):
-        """Hybrid Scoring: (Weighted Fuzzy) * (NLP Similarity + 0.1)"""
         nlp = self._get_nlp()
         elements = self._get_deep_elements()
         clean_intent = self.clean_for_nlp(intent)
@@ -86,94 +101,71 @@ class AIAutomationFramework:
 
         matches = []
         for el in elements:
-            max_fuzzy_weighted = 0
+            max_fuzzy = 0
+            attr_map = {
+                'data-testid': el['data-testid'],
+                'aria-label': el['aria'],
+                'role': el['role'],
+                'placeholder': el['placeholder'],
+                'text_intent': el['text_intent'],
+                'name': el.get('name', ""),
+                'id': el['id']
+            }
+
             for attr, weight in self.WEIGHTS.items():
-                lookup_key = 'aria' if attr == 'aria-label' else attr
-                val = el.get(lookup_key, "")
+                val = attr_map.get(attr, "")
                 if val:
-                    score = fuzz.partial_ratio(clean_intent, self.clean_for_nlp(str(val)))
-                    weighted_score = score * weight
-                    if weighted_score > max_fuzzy_weighted: max_fuzzy_weighted = weighted_score
+                    # Token sort handles "User Name" vs "Name User"
+                    score = fuzz.token_sort_ratio(clean_intent, self.clean_for_nlp(str(val)))
+                    if (score * weight) > max_fuzzy: max_fuzzy = score * weight
 
-            full_context = self.clean_for_nlp(f"{el['id']} {el['name']} {el['text']}")
-            target_doc = nlp(full_context)
-            sim = max(0.0, user_doc.similarity(
-                target_doc)) if user_doc.vector_norm > 0 and target_doc.vector_norm > 0 else 0.0
+            # Similarity Context
+            context_text = self.clean_for_nlp(f"{el['text_intent']} {el['aria']} {el['role']}")
+            target_doc = nlp(context_text)
+            sim = user_doc.similarity(target_doc) if user_doc.vector_norm > 0 and target_doc.vector_norm > 0 else 0.0
 
-            total_score = max_fuzzy_weighted * (sim + 0.1)
+            total_score = max_fuzzy * (sim + 0.1)
             matches.append({"total": total_score, "element": el})
 
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        for match in matches[:3]:
-            el = match['element']
-            candidates = [{"strategy": "id", "value": el['id']}, {"strategy": "name", "value": el['name']}]
-            if el['placeholder']: candidates.append(
-                {"strategy": "css_selector", "value": f"[placeholder='{el['placeholder']}']"})
+        if matches and matches[0]['total'] > 15:  # Confidence Threshold
+            best = matches[0]['element']
 
-            for cand in candidates:
-                if not cand['value']: continue
-                element = self._safe_find_unique(cand['strategy'], cand['value'])
-                if element: return element, cand
+            # CATEGORIZATION: Tells Spark which BasePage tool to use
+            c_type = "TEXTBOX"
+            if best['role'] in ['combobox', 'listbox'] or best['tag'] == 'select':
+                c_type = "DROPDOWN"
+            elif 'radio' in best['role'] or best['tag'] == 'input' and 'radio' in best.get('type', ''):
+                c_type = "TOGGLE"
 
-        return None, None
-
-    def perform_actions(self, step_metadata):
-        """
-        THE EXECUTIONER: Automatically performs the discovered actions.
-        This closes the loop between 'finding' and 'doing'.
-        """
-        for meta in step_metadata:
-            element, locator = self._find_locator_weighted(meta['intent'])
-            if not element:
-                raise Exception(f"❌ AI could not find element for: {meta['intent']}")
-
-            action = meta['action']
-            data = meta.get('test_data')
-
-            if action == "wait_and_type":
-                element.clear()
-                element.send_keys(data)
-                print(f"✅ Typed '{data}' into {meta['intent']}")
-
-            elif action == "wait_and_click":
-                element.click()
-                print(f"✅ Clicked {meta['intent']}")
-
-            elif action == "wait_and_select":
-                select = Select(element)
-                select.select_by_visible_text(data)
-                print(f"✅ Selected '{data}' from {meta['intent']}")
+            return {
+                "intent": intent,
+                "component_type": c_type,
+                "data-testid": best['data-testid'],
+                "aria": best['aria'],
+                "xpath": best['xpath'],
+                "id": best['id'] if not re.search(r'(mui-|id-|:r)', best['id']) else ""
+            }
+        return None
 
     def get_step_metadata(self, step_text):
-        """Processes Gherkin text to find params and intent."""
-        clean_text = step_text.replace("[ai]", "").strip()
-        results, visual_audit_list = [], []
+        """The entry point for Conftest hooks."""
+        results = []
+        # Extract anything in quotes, brackets, or braces
+        params = re.findall(r"[\"'](.*?)[\"']|<(.*?)>|\{(.*?)\}", step_text)
 
-        param_pattern = r"<(.*?)>|\{(.*?)\}|[\"'](.*?)[\"']"
-        found_matches = re.findall(param_pattern, clean_text)
+        for p_group in params:
+            intent = next((i for i in p_group if i), None)
+            if intent:
+                meta = self._find_locator_weighted(intent)
+                if meta: results.append(meta)
 
-        for m in found_matches:
-            intent = next((item for item in m if item), None)
-            if not intent: continue
-            raw_marker = f"<{m[0]}>" if m[0] else f"{{{m[1]}}}" if m[1] else f"\"{m[2]}\""
-
-            element_obj, locator_data = self._find_locator_weighted(intent)
-            if locator_data:
-                if element_obj: visual_audit_list.append({'element': element_obj, 'label': intent})
-                results.append({
-                    "intent": intent, "action": "wait_and_type",
-                    "locator": locator_data, "test_data": raw_marker
-                })
-
-        if not results:  # Fallback for clicks
-            click_match = re.search(r"(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?(\w+)", clean_text, re.IGNORECASE)
-            if click_match:
-                intent = click_match.group(1)
-                element_obj, locator_data = self._find_locator_weighted(intent)
-                if locator_data:
-                    if element_obj: visual_audit_list.append({'element': element_obj, 'label': intent})
-                    results.append(
-                        {"intent": intent, "action": "wait_and_click", "locator": locator_data, "test_data": None})
+        # Simple click intent extraction
+        if not results:
+            action_match = re.search(r"(?:click|select|on)\s+(?:the\s+)?(\w+)", step_text, re.I)
+            if action_match:
+                meta = self._find_locator_weighted(action_match.group(1))
+                if meta: results.append(meta)
 
         return results
