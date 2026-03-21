@@ -1,10 +1,7 @@
 import os
 import re
 import time
-import json
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from thefuzz import fuzz
 
 
@@ -12,15 +9,14 @@ class AIAutomationFramework:
     def __init__(self, driver, timeout=10):
         self.driver = driver
         self.timeout = timeout
-        # STABILITY-FIRST WEIGHTS: React IDs are penalized; data-testids are King.
+        # No data-testid? We pivot to User-Centric weights.
         self.WEIGHTS = {
-            'data-testid': 1.0,
-            'aria-label': 0.9,
-            'role': 0.8,
-            'placeholder': 0.7,
-            'text_intent': 0.6,
-            'name': 0.4,
-            'id': 0.1  # Penalized because React IDs are often dynamic/generated
+            'aria-label': 1.0,  # Most stable in React/MUI
+            'placeholder': 0.9,  # High for text inputs
+            'text_intent': 0.8,  # The label text found near the element
+            'role': 0.7,  # 'combobox', 'button', 'radio'
+            'name': 0.4,  # Often semi-dynamic
+            'id': 0.1  # Lowest: Usually dynamic trash (:r0:)
         }
         self._nlp = None
 
@@ -30,67 +26,86 @@ class AIAutomationFramework:
             try:
                 self._nlp = spacy.load("en_core_web_md")
             except OSError:
-                print("Downloading NLP Model (Organization Standard Requirement)...")
+                print("Downloading NLP Model for Semantic Analysis...")
                 os.system("python -m spacy download en_core_web_md")
                 self._nlp = spacy.load("en_core_web_md")
         return self._nlp
 
     def clean_for_nlp(self, text):
         if not text: return ""
-        # Handle CamelCase, underscores, and dashes
-        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))
+        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))  # Handle CamelCase
         text = text.replace('_', ' ').replace('-', ' ')
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
 
     def _get_deep_elements(self):
         """
-        SCRIPTS: Captures UI metadata.
-        Note: Includes logic to detect if an ID looks auto-generated (React/MUI).
+        PROXIMITY & SEMANTIC SCANNER:
+        Final Version: Added 'name' attribute and tightened proximity bounds.
         """
         return self.driver.execute_script("""
-            const getXPath = (el) => {
-                if (el.id && !/^(mui-|id-|:r)/.test(el.id)) return `//*[@id="${el.id}"]`;
-                const paths = [];
-                for (; el && el.nodeType === 1; el = el.parentNode) {
-                    let index = 0;
-                    for (let sib = el.previousSibling; sib; sib = sib.previousSibling) {
-                        if (sib.nodeType === 1 && sib.tagName === el.tagName) index++;
-                    }
-                    const tagName = el.tagName.toLowerCase();
-                    const pathIndex = index > 0 ? `[${index + 1}]` : "";
-                    paths.unshift(tagName + pathIndex);
+            const getSmartXPath = (el) => {
+                // 1. Stable Attributes (Aria, Placeholder, and now NAME)
+                if (el.getAttribute('aria-label')) return `//*[@aria-label="${el.getAttribute('aria-label')}"]`;
+                if (el.placeholder) return `//${el.tagName.toLowerCase()}[@placeholder="${el.placeholder}"]`;
+
+                // If the name is a real string (not just a number), use it
+                if (el.name && !/^[0-9]+$/.test(el.name)) {
+                    return `//${el.tagName.toLowerCase()}[@name="${el.name}"]`;
                 }
-                return paths.length ? "/" + paths.join("/") : null;
+
+                // 2. PROXIMITY LOGIC
+                const allText = document.querySelectorAll('label, span, p, b, strong');
+                let closestText = "";
+                let minDistance = 150; // Max radius of 150px
+                const elRect = el.getBoundingClientRect();
+
+                allText.forEach(t => {
+                    const txt = t.innerText.trim();
+                    // Ensure we only grab small labels, not huge paragraphs
+                    if (txt.length > 1 && txt.length < 50 && t.children.length === 0) {
+                        const tRect = t.getBoundingClientRect();
+                        const dist = Math.sqrt(
+                            Math.pow(elRect.left - tRect.left, 2) + 
+                            Math.pow(elRect.top - tRect.top, 2)
+                        );
+                        if (dist < minDistance) {
+                            minDistance = dist;
+                            closestText = txt.split('\\n')[0].replace(/[":]/g, ''); // Clean colon/quotes
+                        }
+                    }
+                });
+
+                // 3. Construct Relative Anchor
+                if (closestText) {
+                    const tag = el.tagName.toLowerCase();
+                    return `//*[contains(text(), "${closestText}")]/following::${tag}[1]`;
+                }
+
+                // 4. Fallback: Tag + Index
+                const allTags = Array.from(document.querySelectorAll(el.tagName.toLowerCase()));
+                return `(${el.tagName.toLowerCase()})[${allTags.indexOf(el) + 1}]`;
             };
 
-            const results = [];
-            const query = 'input, button, select, [role="combobox"], [role="radio"], [role="checkbox"], [data-testid]';
+            const found = [];
+            const query = 'input, button, select, [role="combobox"], [role="radio"], [role="checkbox"], a';
             document.querySelectorAll(query).forEach(el => {
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 0 && rect.height > 0) {
-                    // Label Discovery Logic
-                    let label = "";
-                    if (el.id) {
-                        const l = document.querySelector(`label[for="${el.id}"]`);
-                        label = l ? l.innerText : "";
-                    }
-                    if (!label) {
-                        label = el.closest('div')?.innerText.split('\\n')[0] || el.placeholder || "";
-                    }
+                    const role = el.getAttribute('role') || el.type || "";
 
-                    results.push({
+                    found.push({
                         'tag': el.tagName.toLowerCase(),
                         'id': el.id || "",
-                        'data-testid': el.getAttribute('data-testid') || "",
-                        'aria': el.getAttribute('aria-label') || el.getAttribute('title') || "",
-                        'role': el.getAttribute('role') || "",
+                        'name': el.name || "", // <--- CRITICAL: Scrape the 'name' attribute
+                        'aria': el.getAttribute('aria-label') || "",
                         'placeholder': el.placeholder || "",
-                        'text_intent': label.trim(),
-                        'xpath': getXPath(el)
+                        'text_intent': el.innerText.trim() || "",
+                        'role': role,
+                        'xpath': getSmartXPath(el)
                     });
                 }
             });
-            return results;
+            return found;
         """)
 
     def _find_locator_weighted(self, intent):
@@ -103,24 +118,26 @@ class AIAutomationFramework:
         for el in elements:
             max_fuzzy = 0
             attr_map = {
-                'data-testid': el['data-testid'],
                 'aria-label': el['aria'],
-                'role': el['role'],
                 'placeholder': el['placeholder'],
                 'text_intent': el['text_intent'],
-                'name': el.get('name', ""),
+                'role': el['role'],
+                'name': el.get('name', ""), # Correctly pulled from JS now
                 'id': el['id']
             }
 
             for attr, weight in self.WEIGHTS.items():
                 val = attr_map.get(attr, "")
                 if val:
-                    # Token sort handles "User Name" vs "Name User"
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_nlp(str(val)))
-                    if (score * weight) > max_fuzzy: max_fuzzy = score * weight
+                    weighted_score = score * weight
+                    if weighted_score > max_fuzzy:
+                        max_fuzzy = weighted_score
 
-            # Similarity Context
-            context_text = self.clean_for_nlp(f"{el['text_intent']} {el['aria']} {el['role']}")
+            # --- MENTOR FIX: Include 'name' in the NLP Context string ---
+            context_text = self.clean_for_nlp(
+                f"{el['text_intent']} {el['aria']} {el['placeholder']} {el['role']} {el.get('name', '')}"
+            )
             target_doc = nlp(context_text)
             sim = user_doc.similarity(target_doc) if user_doc.vector_norm > 0 and target_doc.vector_norm > 0 else 0.0
 
@@ -129,43 +146,43 @@ class AIAutomationFramework:
 
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        if matches and matches[0]['total'] > 15:  # Confidence Threshold
+        if matches and matches[0]['total'] > 10:
             best = matches[0]['element']
 
-            # CATEGORIZATION: Tells Spark which BasePage tool to use
-            c_type = "TEXTBOX"
+            # Map tag/role to Spark Component Type
+            comp_type = "TEXTBOX"
             if best['role'] in ['combobox', 'listbox'] or best['tag'] == 'select':
-                c_type = "DROPDOWN"
-            elif 'radio' in best['role'] or best['tag'] == 'input' and 'radio' in best.get('type', ''):
-                c_type = "TOGGLE"
+                comp_type = "DROPDOWN"
+            elif 'radio' in best['role'] or 'checkbox' in best['role']:
+                comp_type = "TOGGLE"
+            elif best['tag'] in ['button', 'a'] or best['role'] == 'button':
+                comp_type = "BUTTON"
 
             return {
                 "intent": intent,
-                "component_type": c_type,
-                "data-testid": best['data-testid'],
-                "aria": best['aria'],
+                "component_type": comp_type,
                 "xpath": best['xpath'],
-                "id": best['id'] if not re.search(r'(mui-|id-|:r)', best['id']) else ""
+                "aria": best['aria']
             }
         return None
 
     def get_step_metadata(self, step_text):
-        """The entry point for Conftest hooks."""
+        """Processes the Gherkin line and returns the locator data."""
         results = []
-        # Extract anything in quotes, brackets, or braces
+        # Find parameters in <>, "", or {}
         params = re.findall(r"[\"'](.*?)[\"']|<(.*?)>|\{(.*?)\}", step_text)
 
-        for p_group in params:
-            intent = next((i for i in p_group if i), None)
+        for group in params:
+            intent = next((item for item in group if item), None)
             if intent:
                 meta = self._find_locator_weighted(intent)
                 if meta: results.append(meta)
 
-        # Simple click intent extraction
+        # Fallback for simple clicks like 'Click Submit'
         if not results:
-            action_match = re.search(r"(?:click|select|on)\s+(?:the\s+)?(\w+)", step_text, re.I)
-            if action_match:
-                meta = self._find_locator_weighted(action_match.group(1))
+            match = re.search(r"(?:click|on|select)\s+(?:the\s+)?(\w+)", step_text, re.I)
+            if match:
+                meta = self._find_locator_weighted(match.group(1))
                 if meta: results.append(meta)
 
         return results

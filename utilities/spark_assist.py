@@ -2,48 +2,46 @@ import requests
 import os
 import re
 
-
 class SparkAssist:
     def __init__(self):
-        # ORG STANDARD: Use Environment Variables. Never hardcode keys in a product.
+        # Ensure these environment variables are set or replaced with your actual endpoint
         self.api_url = os.getenv("SPARK_API_URL", "https://your-spark-instance.ai/v1/chat")
         self.api_key = os.getenv("SPARK_API_KEY", "your_api_key_here")
 
     def generate_page_object(self, payload):
-        """
-        The Architect: Translates AI metadata into clean, PEP8 Page Objects.
-        """
-        scenario = payload.get('scenario', 'GeneratedPage').replace(" ", "")
+        # 1. Extract data from payload (mapped to conftest keys)
+        scenario_raw = payload.get('scenario', 'GeneratedPage')
+        scenario_name = re.sub(r'[^a-zA-Z0-9]', '', scenario_raw.title())
         mappings = payload.get('mappings', [])
         is_append = payload.get('is_append', False)
+        ai_prompt = payload.get('prompt', 'No specific instructions provided.')
+        base_source = payload.get('base_page_source', '')
 
-        # TOUGH MENTOR RULE: We tell Spark exactly what to do with the React metadata.
+        # 2. Refined System Instruction
         system_instruction = (
             "ROLE: Senior Automation Architect.\n"
-            "TASK: Generate Python Page Object code for a React application.\n"
-            "STRICT LOCATOR HIERARCHY:\n"
-            "1. Priority 1: [data-testid='value'] (CSS_SELECTOR)\n"
-            "2. Priority 2: [aria-label='value'] (CSS_SELECTOR)\n"
-            "3. Priority 3: Semantic XPath (e.g., //button[text()='Submit'])\n"
-            "4. FORBIDDEN: Never use dynamic IDs (mui-*, :r*, id-*) or absolute XPaths.\n\n"
-            "METHOD INTERFACE MAPPING:\n"
-            "- If component_type is 'DROPDOWN' -> use self.select_list_value_from_dropdown(locator, text)\n"
-            "- If component_type is 'TEXTBOX' -> use self.type_text(locator, text)\n"
-            "- If component_type is 'BUTTON' or 'TOGGLE' -> use self.click_element(locator)\n\n"
-            "STRUCTURE:\n"
-            "- Inherit from 'BasePage'.\n"
-            "- Store locators as private class-level tuples (e.g., _login_btn = (By.ID, '...')).\n"
-            "- Return ONLY raw Python code. No markdown, no backticks."
+            "CONTEXT: React application (No data-testids). Generating Page Object methods.\n"
+            "STRICT RULES:\n"
+            "1. LOCATORS: Use the provided 'xpath' (Relative/Semantic) or 'aria'.\n"
+            "2. CLASS STRUCTURE: If is_append is False, create a class matching the SCENARIO name inheriting from BasePage.\n"
+            "3. METHOD MAPPING:\n"
+            "   - DROPDOWN -> self.select_list_value_from_dropdown(LOCATOR, text)\n"
+            "   - TEXTBOX -> self.type_text(LOCATOR, text)\n"
+            "   - BUTTON/TOGGLE -> self.click_element(LOCATOR)\n"
+            "4. REASONING: Follow the USER PROMPT for specific interaction logic.\n"
+            "5. OUTPUT: Return ONLY raw Python code. No markdown, no explanations."
         )
 
-        user_content = f"""
-        SCENARIO: {scenario}
-        UI METADATA: {mappings}
-        APPEND_MODE: {is_append} (If True, DO NOT write imports or class definition. Write ONLY methods.)
-        """
+        # 3. Comprehensive User Content
+        user_content = (
+            f"SCENARIO_NAME: {scenario_name}\n"
+            f"USER_PROMPT: {ai_prompt}\n"
+            f"METADATA: {mappings}\n"
+            f"IS_APPEND: {is_append}\n"
+            f"BASE_PAGE_METHODS: {base_source[:500]}..." # Give Spark a hint of method names
+        )
 
         try:
-            print(f"--- 📡 Spark: Architecting Page Object for {scenario} ---")
             response = requests.post(
                 self.api_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -53,25 +51,13 @@ class SparkAssist:
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_content}
                     ],
-                    "temperature": 0.1  # Low temperature = high consistency
+                    "temperature": 0.1
                 },
                 timeout=60
             )
             response.raise_for_status()
-
-            # Clean up any accidental AI formatting
+            # Clean up potential markdown wrappers
             raw_code = response.json()['choices'][0]['message']['content']
-            clean_code = re.sub(r'```python|```', '', raw_code).strip()
-
-            return clean_code
-
+            return re.sub(r'```python|```', '', raw_code).strip()
         except Exception as e:
-            return f"# ❌ SparkAssist Error: {str(e)}"
-
-    def format_for_append(self, code):
-        """
-        Ensures the generated methods are correctly indented for an existing class.
-        """
-        lines = code.splitlines()
-        # Indent every line by 4 spaces to fit inside the 'class' block
-        return "\n".join([f"    {line}" if line.strip() else line for line in lines])
+            return f"# ❌ Spark Error: {str(e)}"
