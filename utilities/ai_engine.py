@@ -120,12 +120,13 @@ class AIAutomationFramework:
             attr_map = {
                 'aria-label': el['aria'],
                 'placeholder': el['placeholder'],
-                'text_intent': el['text_intent'],
+                'text_intent': el['text_intent'],  # The 'Proximity Label' from JS
                 'role': el['role'],
-                'name': el.get('name', ""), # Correctly pulled from JS now
+                'name': el.get('name', ""),
                 'id': el['id']
             }
 
+            # 1. Base Fuzzy Scoring
             for attr, weight in self.WEIGHTS.items():
                 val = attr_map.get(attr, "")
                 if val:
@@ -134,16 +135,34 @@ class AIAutomationFramework:
                     if weighted_score > max_fuzzy:
                         max_fuzzy = weighted_score
 
-            # --- MENTOR FIX: Include 'name' in the NLP Context string ---
+            # 2. RESTORED PENALTY LOGIC
+            penalty = 1.0
+
+            # Penalty A: Proximity Mismatch
+            # If the label we found near the element (e.g., 'Country')
+            # doesn't match our intent ('Regions'), we slash the score.
+            if el['text_intent']:
+                label_sim = fuzz.token_sort_ratio(clean_intent, self.clean_for_nlp(el['text_intent']))
+                if label_sim < 60:
+                    penalty *= 0.5
+
+                    # Penalty B: Global Navigation/Header elements
+            # Prevents clicking 'Regions' in a top-menu instead of the form.
+            if any(nav in el['xpath'].lower() for nav in ['header', 'footer', 'nav-menu', 'sidebar']):
+                penalty *= 0.4
+
+            # 3. NLP Similarity
             context_text = self.clean_for_nlp(
                 f"{el['text_intent']} {el['aria']} {el['placeholder']} {el['role']} {el.get('name', '')}"
             )
             target_doc = nlp(context_text)
             sim = user_doc.similarity(target_doc) if user_doc.vector_norm > 0 and target_doc.vector_norm > 0 else 0.0
 
-            total_score = max_fuzzy * (sim + 0.1)
+            # 4. Final Calculation
+            total_score = (max_fuzzy * (sim + 0.1)) * penalty
             matches.append({"total": total_score, "element": el})
 
+        # Sort by best match
         matches.sort(key=lambda x: x['total'], reverse=True)
 
         if matches and matches[0]['total'] > 10:
