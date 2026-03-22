@@ -55,34 +55,51 @@ class AIAutomationFramework:
 
                 allText.forEach(t => {
                     const txt = t.innerText.trim();
+                    // Added check to ignore empty strings or long paragraphs
                     if (txt.length > 1 && txt.length < 50 && t.children.length === 0) {
                         const tRect = t.getBoundingClientRect();
                         const dist = Math.sqrt(Math.pow(elRect.left - tRect.left, 2) + Math.pow(elRect.top - tRect.top, 2));
                         if (dist < minDistance) {
                             minDistance = dist;
-                            closestText = txt.split('\\n')[0].replace(/[":]/g, '');
+                            closestText = txt.split('\\n')[0].replace(/[":*]/g, '').trim();
                         }
                     }
                 });
 
+                // If we found a nearby label, use it as an anchor
                 if (closestText) {
                     return `//*[contains(text(), "${closestText}")]/following::${el.tagName.toLowerCase()}[1]`;
                 }
+
                 const allTags = Array.from(document.querySelectorAll(el.tagName.toLowerCase()));
                 return `(${el.tagName.toLowerCase()})[${allTags.indexOf(el) + 1}]`;
             };
 
             const found = [];
-            // Expanded Query for React: textarea, combobox, switch, etc.
             const query = 'input, button, select, textarea, [contenteditable="true"], [role="combobox"], [role="listbox"], [role="radio"], [role="checkbox"], [role="switch"], a';
 
             document.querySelectorAll(query).forEach(el => {
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 0 || rect.height > 0 || el.isContentEditable) {
+
+                    // --- CRITICAL FIX FOR P1: FIND LABEL BEFORE PUSHING ---
+                    // We need to run a mini-proximity check here to fill 'text_intent'
+                    // otherwise the Python side stays 'blind' to labels.
+                    let labelText = "";
+                    const labels = document.querySelectorAll('label, span, p');
+                    let minDist = 100;
+                    const r = el.getBoundingClientRect();
+                    labels.forEach(l => {
+                        if(l.innerText.trim().length > 1 && l.children.length === 0) {
+                            const lr = l.getBoundingClientRect();
+                            const d = Math.sqrt(Math.pow(r.left-lr.left,2)+Math.pow(r.top-lr.top,2));
+                            if(d < minDist) { minDist = d; labelText = l.innerText.trim(); }
+                        }
+                    });
+
                     let role = el.getAttribute('role') || el.type || "";
                     let tag = el.tagName.toLowerCase();
 
-                    // Standardize custom elements
                     if (el.isContentEditable) { tag = 'textarea'; role = 'textbox'; }
                     if (tag === 'div' && (el.className.includes('select') || role === 'combobox')) { tag = 'select'; }
 
@@ -92,7 +109,7 @@ class AIAutomationFramework:
                         'name': el.name || "",
                         'aria': el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || "",
                         'placeholder': el.placeholder || (el.getAttribute('data-placeholder') || ""),
-                        'text_intent': el.innerText.trim() || "",
+                        'text_intent': labelText || el.innerText.trim() || "", // FIX: Prioritize the found label
                         'role': role,
                         'xpath': getSmartXPath(el)
                     });
