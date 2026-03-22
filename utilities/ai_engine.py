@@ -39,6 +39,10 @@ class AIAutomationFramework:
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
 
     def _get_deep_elements(self):
+        """
+        Final UI Scraper: Captures all interactive elements, handles React
+        dropdowns/li items, and relates labels to inputs via JS proximity.
+        """
         return self.driver.execute_script("""
             const getSmartXPath = (el) => {
                 const tag = el.tagName.toLowerCase();
@@ -52,8 +56,10 @@ class AIAutomationFramework:
 
                 // PHASE 1: For Triggers, use ARIA or Proximity Label
                 if (el.getAttribute('aria-label')) return `//*[@aria-label="${el.getAttribute('aria-label')}"]`;
+                if (el.placeholder) return `//${tag}[@placeholder="${el.placeholder}"]`;
+                if (el.name && !/^[0-9]+$/.test(el.name)) return `//${tag}[@name="${el.name}"]`;
 
-                const allText = document.querySelectorAll('label, span, p, b');
+                const allText = document.querySelectorAll('label, span, p, b, strong');
                 let closestText = "";
                 let minDistance = 150; 
                 const elRect = el.getBoundingClientRect();
@@ -70,35 +76,52 @@ class AIAutomationFramework:
                     }
                 });
 
-                return closestText ? `//*[contains(text(), "${closestText}")]/following::${tag}[1]` : `(${tag})[1]`;
+                if (closestText) {
+                    return `//*[contains(text(), "${closestText}")]/following::${tag}[1]`;
+                }
+
+                const allTags = Array.from(document.querySelectorAll(tag));
+                return `(${tag})[${allTags.indexOf(el) + 1}]`;
             };
 
             const found = [];
-            // Expanded query to catch React Portals and custom selects
-            const query = 'input, button, select, textarea, li, [role="option"], [role="combobox"], .MuiSelect-select, a';
+            // Query for all potential interactive elements including React dropdown parts
+            const query = 'input, button, select, textarea, li, [role="option"], [role="combobox"], [role="listbox"], [role="switch"], .MuiSelect-select, a';
 
             document.querySelectorAll(query).forEach(el => {
                 const rect = el.getBoundingClientRect();
+                // Visible elements OR list items (which might be in a portal)
                 if (rect.width > 0 || rect.height > 0 || el.tagName.toLowerCase() === 'li') {
 
+                    // Proximity Check: Find the nearest label text for this element
                     let labelText = "";
-                    const labels = document.querySelectorAll('label, span, p');
-                    const r = el.getBoundingClientRect();
+                    const labels = document.querySelectorAll('label, span, p, b');
                     let minDist = 100;
-
+                    const r = el.getBoundingClientRect();
                     labels.forEach(l => {
-                        if(l.innerText.trim().length > 1) {
+                        const txt = l.innerText.trim();
+                        if(txt.length > 1 && l.children.length === 0) {
                             const lr = l.getBoundingClientRect();
                             const d = Math.sqrt(Math.pow(r.left-lr.left,2)+Math.pow(r.top-lr.top,2));
-                            if(d < minDist) { minDist = d; labelText = l.innerText.trim(); }
+                            if(d < minDist) { minDist = d; labelText = txt; }
                         }
                     });
 
-                    found.append({
-                        'tag': el.tagName.toLowerCase(),
+                    let role = el.getAttribute('role') || el.type || "";
+                    let tag = el.tagName.toLowerCase();
+
+                    // Standardize React/MUI components for the Python Brain
+                    if (el.isContentEditable) { tag = 'textarea'; role = 'textbox'; }
+                    if (tag === 'div' && (el.className.includes('select') || role === 'combobox')) { tag = 'select'; }
+
+                    found.push({
+                        'tag': tag,
                         'id': el.id || "",
-                        'text_intent': labelText || el.innerText.trim(),
-                        'role': el.getAttribute('role') || el.type || "",
+                        'name': el.name || (el.getAttribute('name') || ""),
+                        'aria': el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || "",
+                        'placeholder': el.placeholder || (el.getAttribute('data-placeholder') || ""),
+                        'text_intent': labelText || el.innerText.trim() || "",
+                        'role': role,
                         'xpath': getSmartXPath(el)
                     });
                 }
@@ -107,14 +130,19 @@ class AIAutomationFramework:
         """)
 
     def _find_locator_weighted(self, intent):
+        """
+        P1 & P3 UI Brain: Matches the Gherkin 'intent' to the best
+        scraped element using Fuzzy Matching + NLP Similarity.
+        """
         nlp = self._get_nlp()
         elements = self._get_deep_elements()
+        # Step 1: Normalize 'permission_group' -> 'permission group'
         clean_intent = self.clean_for_fuzzy(intent)
         user_doc = nlp(clean_intent)
 
         matches = []
         for el in elements:
-            # 1. Fuzzy Matching
+            # 1. Fuzzy Matching (Maps to JS keys: id, name, aria, placeholder, text_intent, role)
             max_fuzzy = 0
             attr_map = {
                 'aria-label': el.get('aria', ""),
@@ -128,32 +156,35 @@ class AIAutomationFramework:
             for attr, weight in self.WEIGHTS.items():
                 val = attr_map.get(attr, "")
                 if val:
+                    # token_sort_ratio handles "Group Permission" vs "Permission Group"
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_fuzzy(str(val)))
                     max_fuzzy = max(max_fuzzy, score * weight)
 
-            # 2. Boost/Penalize (React-Aware)
+            # 2. React-Aware Boosts (From your logic)
             tag = el['tag'].lower()
-            role = (el.get('role') or "").lower()  # Handle None types safely
+            role = (el.get('role') or "").lower()
 
-            # Boost form elements + list items, penalize generic links
+            # Boost form fields and dropdown items; penalize generic navigation links
             adjustment = 0.3 if (tag == 'a' and 'button' not in role) else 1.2 if (
                     tag in ['input', 'button', 'select', 'textarea', 'li'] or
                     any(r in role for r in ['button', 'combobox', 'listbox', 'switch', 'option'])
             ) else 1.0
 
-            # 3. Location Penalty
+            # 3. Screen Location Penalty
             penalty = 0.4 if any(
                 nav in el['xpath'].lower() for nav in ['header', 'footer', 'nav-menu', 'sidebar']) else 1.0
-            penalty = max(penalty, 0.1)
 
-            # 4. NLP Similarity (The Self-Healing Sauce)
+            # 4. NLP Similarity (Self-Healing Sauce)
+            # We combine all context to see if the element "feels" like the intent
             context_text = self.clean_for_fuzzy(
                 f"{el.get('text_intent', '')} {el.get('aria', '')} {el.get('placeholder', '')} {role} {el.get('name', '')}")
             sim = user_doc.similarity(nlp(context_text)) if user_doc.vector_norm > 0 else 0.0
 
+            # Final Combined Calculation
             total_score = max_fuzzy * (sim + 0.1) * adjustment * penalty
             matches.append({"total": total_score, "element": el})
 
+        # Sort to get the single best match
         matches.sort(key=lambda x: x['total'], reverse=True)
 
         if matches and matches[0]['total'] > 10:
@@ -161,8 +192,8 @@ class AIAutomationFramework:
             best_tag = best['tag'].lower()
             best_role = (best.get('role') or "").lower()
 
-            # --- SPARK FINALIZATION MAPPING (The Handshake) ---
-            # Explicitly include 'li' and 'option' roles so Spark knows it's a DROPDOWN selection
+            # --- SPARK FINALIZATION MAPPING ---
+            # This 'component_type' tells Spark which POM method to generate
             if any(r in best_role for r in ['combobox', 'listbox', 'option']) or best_tag in ['select', 'li']:
                 c_type = "DROPDOWN"
             elif any(r in best_role for r in ['radio', 'checkbox', 'switch']):
