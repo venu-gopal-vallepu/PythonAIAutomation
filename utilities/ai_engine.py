@@ -9,14 +9,14 @@ class AIAutomationFramework:
     def __init__(self, driver, timeout=10):
         self.driver = driver
         self.timeout = timeout
-        # No data-testid? We pivot to User-Centric weights.
+        # User-Centric weights optimized for React/MUI (No stable IDs)
         self.WEIGHTS = {
-            'aria-label': 1.0,  # Most stable in React/MUI
-            'placeholder': 0.9,  # High for text inputs
-            'text_intent': 0.8,  # The label text found near the element
-            'role': 0.7,  # 'combobox', 'button', 'radio'
-            'name': 0.4,  # Often semi-dynamic
-            'id': 0.1  # Lowest: Usually dynamic trash (:r0:)
+            'aria-label': 1.0,
+            'placeholder': 0.9,
+            'text_intent': 0.8,  # Nearby label text found by JS
+            'role': 0.7,
+            'name': 0.4,
+            'id': 0.1  # Lowest priority for dynamic React IDs
         }
         self._nlp = None
 
@@ -31,16 +31,17 @@ class AIAutomationFramework:
                 self._nlp = spacy.load("en_core_web_md")
         return self._nlp
 
-    def clean_for_nlp(self, text):
+    def clean_for_fuzzy(self, text):
+        """Cleans strings for better matching (CamelCase, snake_case, etc)."""
         if not text: return ""
-        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))  # Handle CamelCase
+        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))
         text = text.replace('_', ' ').replace('-', ' ')
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
 
     def _get_deep_elements(self):
         """
-        Final Enterprise Scraper: Captures textareas, custom React dropdowns,
-        and relates labels to inputs via proximity.
+        Scraper: Captures all interactive elements, handles React-specific roles,
+        and uses JS proximity to find the nearest text label.
         """
         return self.driver.execute_script("""
             const getSmartXPath = (el) => {
@@ -55,7 +56,6 @@ class AIAutomationFramework:
 
                 allText.forEach(t => {
                     const txt = t.innerText.trim();
-                    // Added check to ignore empty strings or long paragraphs
                     if (txt.length > 1 && txt.length < 50 && t.children.length === 0) {
                         const tRect = t.getBoundingClientRect();
                         const dist = Math.sqrt(Math.pow(elRect.left - tRect.left, 2) + Math.pow(elRect.top - tRect.top, 2));
@@ -66,7 +66,6 @@ class AIAutomationFramework:
                     }
                 });
 
-                // If we found a nearby label, use it as an anchor
                 if (closestText) {
                     return `//*[contains(text(), "${closestText}")]/following::${el.tagName.toLowerCase()}[1]`;
                 }
@@ -82,9 +81,7 @@ class AIAutomationFramework:
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 0 || rect.height > 0 || el.isContentEditable) {
 
-                    // --- CRITICAL FIX FOR P1: FIND LABEL BEFORE PUSHING ---
-                    // We need to run a mini-proximity check here to fill 'text_intent'
-                    // otherwise the Python side stays 'blind' to labels.
+                    // JS Proximity check to fill 'text_intent' for the Python brain
                     let labelText = "";
                     const labels = document.querySelectorAll('label, span, p');
                     let minDist = 100;
@@ -100,6 +97,7 @@ class AIAutomationFramework:
                     let role = el.getAttribute('role') || el.type || "";
                     let tag = el.tagName.toLowerCase();
 
+                    // Standardize React/MUI components
                     if (el.isContentEditable) { tag = 'textarea'; role = 'textbox'; }
                     if (tag === 'div' && (el.className.includes('select') || role === 'combobox')) { tag = 'select'; }
 
@@ -109,7 +107,7 @@ class AIAutomationFramework:
                         'name': el.name || "",
                         'aria': el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || "",
                         'placeholder': el.placeholder || (el.getAttribute('data-placeholder') || ""),
-                        'text_intent': labelText || el.innerText.trim() || "", // FIX: Prioritize the found label
+                        'text_intent': labelText || el.innerText.trim() || "",
                         'role': role,
                         'xpath': getSmartXPath(el)
                     });
@@ -126,7 +124,7 @@ class AIAutomationFramework:
 
         matches = []
         for el in elements:
-            # 1. Basic Fuzzy Score
+            # 1. Fuzzy Matching
             max_fuzzy = 0
             attr_map = {
                 'aria-label': el['aria'],
@@ -143,36 +141,32 @@ class AIAutomationFramework:
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_fuzzy(str(val)))
                     max_fuzzy = max(max_fuzzy, score * weight)
 
-            # 2. FROM YOUR SCREENSHOTS: Boost/Penalize logic
+            # 2. Boost/Penalize (From Screenshots)
             tag, role = el['tag'].lower(), el['role'].lower()
-
-            # Boost form elements, penalize generic links
             adjustment = 0.3 if (tag == 'a' and role != 'button') else 1.2 if (
                     tag in ['input', 'button', 'select', 'textarea'] or role in ['button', 'combobox', 'listbox',
                                                                                  'switch']) else 1.0
 
-            # 3. FROM YOUR SCREENSHOTS: Location Penalty
+            # 3. Location Penalty (From Screenshots)
             penalty = 0.4 if any(
                 nav in el['xpath'].lower() for nav in ['header', 'footer', 'nav-menu', 'sidebar']) else 1.0
             penalty = max(penalty, 0.1)  # Your Screenshot Guard
 
-            # 4. NLP Similarity Score
+            # 4. NLP Similarity (Self-Healing)
             context_text = self.clean_for_fuzzy(
                 f"{el['text_intent']} {el['aria']} {el['placeholder']} {el['role']} {el.get('name', '')}")
-            # Calculate similarity between what the user wants and what the element "is"
             sim = user_doc.similarity(nlp(context_text)) if user_doc.vector_norm > 0 else 0.0
 
-            # Final Combined Calculation
+            # Total Score
             total_score = max_fuzzy * (sim + 0.1) * adjustment * penalty
             matches.append({"total": total_score, "element": el})
 
-        # Sort to get the best match at index 0
         matches.sort(key=lambda x: x['total'], reverse=True)
 
         if matches and matches[0]['total'] > 10:
             best = matches[0]['element']
 
-            # Map complex tags to simple Spark Assist categories
+            # Spark Assist Finalization Mapping
             if best['role'] in ['combobox', 'listbox'] or best['tag'] == 'select':
                 c_type = "DROPDOWN"
             elif any(x in best['role'] for x in ['radio', 'checkbox', 'switch']):
@@ -188,13 +182,11 @@ class AIAutomationFramework:
                 "xpath": best['xpath'],
                 "aria": best['aria']
             }
-
         return None
 
     def get_step_metadata(self, step_text):
         """Processes the Gherkin line and returns the locator data."""
         results = []
-        # Find parameters in <>, "", or {}
         params = re.findall(r"[\"'](.*?)[\"']|<(.*?)>|\{(.*?)\}", step_text)
 
         for group in params:
@@ -203,7 +195,6 @@ class AIAutomationFramework:
                 meta = self._find_locator_weighted(intent)
                 if meta: results.append(meta)
 
-        # Fallback for simple clicks like 'Click Submit'
         if not results:
             match = re.search(r"(?:click|on|select)\s+(?:the\s+)?(\w+)", step_text, re.I)
             if match:
