@@ -4,12 +4,10 @@ import re
 
 class SparkAssist:
     def __init__(self):
-        # Ensure these environment variables are set or replaced with your actual endpoint
         self.api_url = os.getenv("SPARK_API_URL", "https://your-spark-instance.ai/v1/chat")
         self.api_key = os.getenv("SPARK_API_KEY", "your_api_key_here")
 
     def generate_page_object(self, payload):
-        # 1. Extract data from payload (mapped to conftest keys)
         scenario_raw = payload.get('scenario', 'GeneratedPage')
         scenario_name = re.sub(r'[^a-zA-Z0-9]', '', scenario_raw.title())
         mappings = payload.get('mappings', [])
@@ -17,28 +15,30 @@ class SparkAssist:
         ai_prompt = payload.get('prompt', 'No specific instructions provided.')
         base_source = payload.get('base_page_source', '')
 
-        # 2. Refined System Instruction
+        # 2. UPDATED System Instruction for Dynamic Parameterization
         system_instruction = (
             "ROLE: Senior Automation Architect.\n"
-            "CONTEXT: React application (No data-testids). Generating Page Object methods.\n"
-            "STRICT RULES:\n"
-            "1. LOCATORS: Use the provided 'xpath' (Relative/Semantic) or 'aria'.\n"
-            "2. CLASS STRUCTURE: If is_append is False, create a class matching the SCENARIO name inheriting from BasePage.\n"
-            "3. METHOD MAPPING:\n"
-            "   - DROPDOWN -> self.select_list_value_from_dropdown(LOCATOR, text)\n"
-            "   - TEXTBOX -> self.type_text(LOCATOR, text)\n"
-            "   - BUTTON/TOGGLE -> self.click_element(LOCATOR)\n"
-            "4. REASONING: Follow the USER PROMPT for specific interaction logic.\n"
-            "5. OUTPUT: Return ONLY raw Python code. No markdown, no explanations."
+            "STRICT RULES FOR DYNAMIC DATA (EXAMPLES TABLE):\n"
+            "1. NO HARDCODED VALUES: If an element has 'template_xpath', use it with .format(value=param).\n"
+            "2. METHOD SIGNATURES:\n"
+            "   - If 'is_data_input' is True OR 'template_xpath' exists, the method MUST accept a parameter (e.g., 'text' or 'value').\n"
+            "   - Example: def select_role(self, role_name): self.click(self.role_template.format(value=role_name))\n"
+            "3. COMPONENT LOGIC:\n"
+            "   - DROPDOWN: Use 'template_xpath' to click the specific item revealed by the trigger.\n"
+            "   - TEXTBOX: Use the static 'xpath' but accept 'text' as a method parameter.\n"
+            "   - TOGGLE: Generate code to check .is_selected() before clicking to ensure it matches desired state.\n"
+            "4. CLASS STRUCTURE: Inherit from BasePage. If is_append is True, only return new methods.\n"
+            "5. BASE_PAGE CONTEXT: Use methods found in the provided BASE_PAGE_METHODS (e.g., self.click_element, self.type_text).\n"
+            "OUTPUT: ONLY raw Python code. No markdown, no explanations."
         )
 
-        # 3. Comprehensive User Content
+        # 3. Comprehensive User Content (Sending full base source for context)
         user_content = (
             f"SCENARIO_NAME: {scenario_name}\n"
             f"USER_PROMPT: {ai_prompt}\n"
-            f"METADATA: {mappings}\n"
+            f"METADATA_FROM_AI_ENGINE: {mappings}\n"
             f"IS_APPEND: {is_append}\n"
-            f"BASE_PAGE_METHODS: {base_source[:500]}..." # Give Spark a hint of method names
+            f"BASE_PAGE_FULL_CONTEXT:\n{base_source}" # Sending full source so Spark sees all method names
         )
 
         try:
@@ -51,12 +51,11 @@ class SparkAssist:
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_content}
                     ],
-                    "temperature": 0.1
+                    "temperature": 0.1 # Keep it deterministic
                 },
                 timeout=60
             )
             response.raise_for_status()
-            # Clean up potential markdown wrappers
             raw_code = response.json()['choices'][0]['message']['content']
             return re.sub(r'```python|```', '', raw_code).strip()
         except Exception as e:
