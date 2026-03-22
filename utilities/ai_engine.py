@@ -39,17 +39,21 @@ class AIAutomationFramework:
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().strip()
 
     def _get_deep_elements(self):
-        """
-        Scraper: Captures all interactive elements, handles React-specific roles,
-        and uses JS proximity to find the nearest text label.
-        """
         return self.driver.execute_script("""
             const getSmartXPath = (el) => {
-                if (el.getAttribute('aria-label')) return `//*[@aria-label="${el.getAttribute('aria-label')}"]`;
-                if (el.placeholder) return `//${el.tagName.toLowerCase()}[@placeholder="${el.placeholder}"]`;
-                if (el.name && !/^[0-9]+$/.test(el.name)) return `//${el.tagName.toLowerCase()}[@name="${el.name}"]`;
+                const tag = el.tagName.toLowerCase();
+                const role = el.getAttribute('role') || "";
 
-                const allText = document.querySelectorAll('label, span, p, b, strong');
+                // PHASE 2: For Dropdown Items (li/options), use Global Text Anchor
+                if (tag === 'li' || role === 'option' || el.className.includes('option')) {
+                    const txt = el.innerText.trim();
+                    return `//li[contains(normalize-space(), "${txt}")] | //*[contains(@role, "option")][contains(normalize-space(), "${txt}")]`;
+                }
+
+                // PHASE 1: For Triggers, use ARIA or Proximity Label
+                if (el.getAttribute('aria-label')) return `//*[@aria-label="${el.getAttribute('aria-label')}"]`;
+
+                const allText = document.querySelectorAll('label, span, p, b');
                 let closestText = "";
                 let minDistance = 150; 
                 const elRect = el.getBoundingClientRect();
@@ -66,49 +70,35 @@ class AIAutomationFramework:
                     }
                 });
 
-                if (closestText) {
-                    return `//*[contains(text(), "${closestText}")]/following::${el.tagName.toLowerCase()}[1]`;
-                }
-
-                const allTags = Array.from(document.querySelectorAll(el.tagName.toLowerCase()));
-                return `(${el.tagName.toLowerCase()})[${allTags.indexOf(el) + 1}]`;
+                return closestText ? `//*[contains(text(), "${closestText}")]/following::${tag}[1]` : `(${tag})[1]`;
             };
 
             const found = [];
-            const query = 'input, button, select, textarea, [contenteditable="true"], [role="combobox"], [role="listbox"], [role="radio"], [role="checkbox"], [role="switch"], a';
+            // Expanded query to catch React Portals and custom selects
+            const query = 'input, button, select, textarea, li, [role="option"], [role="combobox"], .MuiSelect-select, a';
 
             document.querySelectorAll(query).forEach(el => {
                 const rect = el.getBoundingClientRect();
-                if (rect.width > 0 || rect.height > 0 || el.isContentEditable) {
+                if (rect.width > 0 || rect.height > 0 || el.tagName.toLowerCase() === 'li') {
 
-                    // JS Proximity check to fill 'text_intent' for the Python brain
                     let labelText = "";
                     const labels = document.querySelectorAll('label, span, p');
-                    let minDist = 100;
                     const r = el.getBoundingClientRect();
+                    let minDist = 100;
+
                     labels.forEach(l => {
-                        if(l.innerText.trim().length > 1 && l.children.length === 0) {
+                        if(l.innerText.trim().length > 1) {
                             const lr = l.getBoundingClientRect();
                             const d = Math.sqrt(Math.pow(r.left-lr.left,2)+Math.pow(r.top-lr.top,2));
                             if(d < minDist) { minDist = d; labelText = l.innerText.trim(); }
                         }
                     });
 
-                    let role = el.getAttribute('role') || el.type || "";
-                    let tag = el.tagName.toLowerCase();
-
-                    // Standardize React/MUI components
-                    if (el.isContentEditable) { tag = 'textarea'; role = 'textbox'; }
-                    if (tag === 'div' && (el.className.includes('select') || role === 'combobox')) { tag = 'select'; }
-
-                    found.push({
-                        'tag': tag,
+                    found.append({
+                        'tag': el.tagName.toLowerCase(),
                         'id': el.id || "",
-                        'name': el.name || "",
-                        'aria': el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || "",
-                        'placeholder': el.placeholder || (el.getAttribute('data-placeholder') || ""),
-                        'text_intent': labelText || el.innerText.trim() || "",
-                        'role': role,
+                        'text_intent': labelText || el.innerText.trim(),
+                        'role': el.getAttribute('role') || el.type || "",
                         'xpath': getSmartXPath(el)
                     });
                 }
@@ -127,12 +117,12 @@ class AIAutomationFramework:
             # 1. Fuzzy Matching
             max_fuzzy = 0
             attr_map = {
-                'aria-label': el['aria'],
-                'placeholder': el['placeholder'],
-                'text_intent': el['text_intent'],
-                'role': el['role'],
+                'aria-label': el.get('aria', ""),
+                'placeholder': el.get('placeholder', ""),
+                'text_intent': el.get('text_intent', ""),
+                'role': el.get('role', ""),
                 'name': el.get('name', ""),
-                'id': el['id']
+                'id': el.get('id', "")
             }
 
             for attr, weight in self.WEIGHTS.items():
@@ -141,23 +131,26 @@ class AIAutomationFramework:
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_fuzzy(str(val)))
                     max_fuzzy = max(max_fuzzy, score * weight)
 
-            # 2. Boost/Penalize (From Screenshots)
-            tag, role = el['tag'].lower(), el['role'].lower()
-            adjustment = 0.3 if (tag == 'a' and role != 'button') else 1.2 if (
-                    tag in ['input', 'button', 'select', 'textarea'] or role in ['button', 'combobox', 'listbox',
-                                                                                 'switch']) else 1.0
+            # 2. Boost/Penalize (React-Aware)
+            tag = el['tag'].lower()
+            role = (el.get('role') or "").lower()  # Handle None types safely
 
-            # 3. Location Penalty (From Screenshots)
+            # Boost form elements + list items, penalize generic links
+            adjustment = 0.3 if (tag == 'a' and 'button' not in role) else 1.2 if (
+                    tag in ['input', 'button', 'select', 'textarea', 'li'] or
+                    any(r in role for r in ['button', 'combobox', 'listbox', 'switch', 'option'])
+            ) else 1.0
+
+            # 3. Location Penalty
             penalty = 0.4 if any(
                 nav in el['xpath'].lower() for nav in ['header', 'footer', 'nav-menu', 'sidebar']) else 1.0
-            penalty = max(penalty, 0.1)  # Your Screenshot Guard
+            penalty = max(penalty, 0.1)
 
-            # 4. NLP Similarity (Self-Healing)
+            # 4. NLP Similarity (The Self-Healing Sauce)
             context_text = self.clean_for_fuzzy(
-                f"{el['text_intent']} {el['aria']} {el['placeholder']} {el['role']} {el.get('name', '')}")
+                f"{el.get('text_intent', '')} {el.get('aria', '')} {el.get('placeholder', '')} {role} {el.get('name', '')}")
             sim = user_doc.similarity(nlp(context_text)) if user_doc.vector_norm > 0 else 0.0
 
-            # Total Score
             total_score = max_fuzzy * (sim + 0.1) * adjustment * penalty
             matches.append({"total": total_score, "element": el})
 
@@ -165,13 +158,16 @@ class AIAutomationFramework:
 
         if matches and matches[0]['total'] > 10:
             best = matches[0]['element']
+            best_tag = best['tag'].lower()
+            best_role = (best.get('role') or "").lower()
 
-            # Spark Assist Finalization Mapping
-            if best['role'] in ['combobox', 'listbox'] or best['tag'] == 'select':
+            # --- SPARK FINALIZATION MAPPING (The Handshake) ---
+            # Explicitly include 'li' and 'option' roles so Spark knows it's a DROPDOWN selection
+            if any(r in best_role for r in ['combobox', 'listbox', 'option']) or best_tag in ['select', 'li']:
                 c_type = "DROPDOWN"
-            elif any(x in best['role'] for x in ['radio', 'checkbox', 'switch']):
+            elif any(r in best_role for r in ['radio', 'checkbox', 'switch']):
                 c_type = "TOGGLE"
-            elif best['tag'] in ['button', 'a'] or best['role'] == 'button':
+            elif best_tag in ['button', 'a'] or 'button' in best_role:
                 c_type = "BUTTON"
             else:
                 c_type = "TEXTBOX"
@@ -180,25 +176,33 @@ class AIAutomationFramework:
                 "intent": intent,
                 "component_type": c_type,
                 "xpath": best['xpath'],
-                "aria": best['aria']
+                "aria": best.get('aria', "")
             }
         return None
 
     def get_step_metadata(self, step_text):
-        """Processes the Gherkin line and returns the locator data."""
+
         results = []
+
+        # 1. Extract all parameters: "Admin", "permission_group", etc.
+        # This regex catches text in quotes "", angle brackets <>, or curly braces {}
         params = re.findall(r"[\"'](.*?)[\"']|<(.*?)>|\{(.*?)\}", step_text)
 
         for group in params:
+            # Get the non-empty match from the regex group
             intent = next((item for item in group if item), None)
             if intent:
+                # Call the Brain to find the element and identify if it's a DROPDOWN, BUTTON, etc.
                 meta = self._find_locator_weighted(intent)
-                if meta: results.append(meta)
+                if meta:
+                    results.append(meta)
 
         if not results:
-            match = re.search(r"(?:click|on|select)\s+(?:the\s+)?(\w+)", step_text, re.I)
+            match = re.search(r"(?:click|on|select|type|into)\s+(?:the\s+)?(\w+)", step_text, re.I)
             if match:
                 meta = self._find_locator_weighted(match.group(1))
-                if meta: results.append(meta)
+                if meta:
+                    results.append(meta)
 
+        # P1 Success: Returns a list of locators for Spark to process in sequence
         return results
