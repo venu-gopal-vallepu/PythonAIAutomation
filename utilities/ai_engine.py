@@ -12,7 +12,7 @@ class AIAutomationFramework:
     def __init__(self, driver, timeout=10):
         self.driver = driver
         self.timeout = timeout
-        # Weights for Self-Healing
+        # Weights for Self-Healing: Prioritizes stable attributes over brittle IDs
         self.WEIGHTS = {
             'aria-label': 1.0,
             'placeholder': 0.9,
@@ -35,7 +35,7 @@ class AIAutomationFramework:
 
     def clean_for_fuzzy(self, text):
         if not text: return ""
-        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))
+        text = re.sub(r'(?<!^)(?=[A-Z])', ' ', str(text))  # Handle PascalCase
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().replace('_', ' ').strip()
 
     def visual_debug(self, xpath, intent):
@@ -68,52 +68,78 @@ class AIAutomationFramework:
             return False
 
     def _get_deep_elements(self):
-        """ARCHITECT SCRAPER: Captures Name, Placeholder, and Visual Proximity."""
+        """ARCHITECT SCRAPER: Pairs Labels to Controls using Geometric Proximity."""
         return self.driver.execute_script("""
             const getControlInfo = (el) => {
                 const style = window.getComputedStyle(el);
-                const role = el.getAttribute('role') || el.type || "";
-                const tag = el.tagName.toLowerCase();
-
-                // Ensure the element is actually interactable by a human
+                const tag = el.tagName.toUpperCase(); 
+                const role = (el.getAttribute('role') || "").toLowerCase();
+                const type = (el.getAttribute('type') || "").toLowerCase();
                 const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0 && style.visibility !== 'hidden';
 
+                // 🚀 Classification Logic: Handles Native, ARIA, and Role-less Apps (Class-based heuristics)
+                const isDropdown = tag === 'SELECT' || 
+                                   role.includes('combobox') || 
+                                   role.includes('listbox') || 
+                                   (style.cursor === 'pointer' && (
+                                       el.innerText.includes('▼') || 
+                                       el.querySelector('svg') || 
+                                       /select|dropdown/i.test(el.className)
+                                   ));
+
+                const isTextarea = tag === 'TEXTAREA' || role === 'textbox';
+
+                // Categorize as Input if it's a standard field, a textarea, or a select box
+                const isInput = (tag === 'INPUT' && !['button', 'submit', 'checkbox', 'radio'].includes(type)) || 
+                                isTextarea || tag === 'SELECT';
+
                 return {
-                    tag: tag,
-                    role: role,
+                    tag: tag, role: role,
                     aria: el.getAttribute('aria-label') || "",
                     placeholder: el.getAttribute('placeholder') || "",
                     name: el.getAttribute('name') || "",
                     id: el.id || "",
-                    isDropdown: role.includes('combobox') || role.includes('listbox') || tag === 'select' || (style.cursor === 'pointer' && el.innerText.includes('▼')),
-                    isInput: ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag),
+                    isDropdown: isDropdown,
+                    isInput: isInput,
                     isVisible: isVisible
                 };
             };
 
             const generateSemanticXPath = (el, intentText) => {
                 const clean = intentText.replace(/[":]/g, "").trim();
-                return `//*[contains(normalize-space(), "${clean}")]/following::*[(self::input or self::select or @role or @onclick or contains(@style, "cursor: pointer"))][1]`;
+                return `//*[contains(normalize-space(), "${clean}")]/following::*[(self::input or self::select or self::textarea or @role or @onclick or contains(@style, "cursor: pointer"))][1]`;
             };
 
             const found = [];
             const all = Array.from(document.querySelectorAll('*'));
 
-            // Only consider controls that are VISIBLE to avoid 'Hidden Input' traps
+            // 1. Identify valid interactable controls
             const controls = all.filter(el => {
                 const info = getControlInfo(el);
                 return info.isVisible && (window.getComputedStyle(el).cursor === 'pointer' || el.onclick || info.isInput);
             });
 
-            all.filter(el => el.innerText?.trim().length > 1 && el.innerText.length < 50 && el.children.length === 0).forEach(node => {
+            // 2. Scan for Label candidates (Relaxed for React/MUI nesting)
+            all.filter(el => {
+                const text = el.innerText?.trim() || "";
+                // Relaxed child limit (<= 3) to handle MUI icons/formatting inside labels
+                return text.length > 1 && text.length < 60 && el.children.length <= 3 && 
+                       !['INPUT', 'SELECT', 'TEXTAREA', 'SCRIPT', 'STYLE'].includes(el.tagName.toUpperCase());
+            }).forEach(node => {
                 const rT = node.getBoundingClientRect();
-                let closest = null; let minDist = 180; // Slightly larger radius for spacious MUI layouts
+                let closest = null; let minDist = 200; 
 
                 controls.forEach(c => {
                     if (c === node) return;
                     const rC = c.getBoundingClientRect();
-                    const d = Math.hypot((rT.left+rT.width/2)-(rC.left+rC.width/2), (rT.top+rT.height/2)-(rC.top+rC.height/2));
-                    if (d < minDist) { minDist = d; closest = c; }
+                    const d = Math.hypot(
+                        (rT.left + rT.width/2) - (rC.left + rC.width/2), 
+                        (rT.top + rT.height/2) - (rC.top + rC.height/2)
+                    );
+                    if (d < minDist) { 
+                        minDist = d; 
+                        closest = c; 
+                    }
                 });
 
                 if (closest) {
@@ -130,23 +156,24 @@ class AIAutomationFramework:
         """)
 
     def _find_locator_weighted(self, intent):
-        """The Brain: Matches Intent to Scraped Metadata using NLP + Multi-Attr Fuzzy."""
+        """The Brain: Matches Intent to Metadata using NLP + Multi-Attr Fuzzy."""
         nlp = self._get_nlp()
         elements = self._get_deep_elements()
+
+        if not elements:
+            print("⚠️ [AI ERROR]: Scraper found 0 elements. Check page load.")
+            return None
+
         clean_intent = self.clean_for_fuzzy(intent)
         user_doc = nlp(clean_intent)
-
         matches = []
+
         for el in elements:
             max_fuzzy = 0
-            # Attribute Map for Weighted Scoring
             attr_map = {
-                'aria-label': el['aria'],
-                'placeholder': el['placeholder'],
-                'name': el['name'],
-                'intent': el['intent'],
-                'role': el['role'],
-                'id': el['id']
+                'aria-label': el['aria'], 'placeholder': el['placeholder'],
+                'name': el['name'], 'intent': el['intent'],
+                'role': el['role'], 'id': el['id']
             }
 
             for attr, weight in self.WEIGHTS.items():
@@ -155,7 +182,6 @@ class AIAutomationFramework:
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_fuzzy(str(val)))
                     max_fuzzy = max(max_fuzzy, score * weight)
 
-            # Contextual Similarity (Intent + Name + Placeholder)
             context_str = f"{el['intent']} {el['name']} {el['placeholder']} {el['role']}"
             context_doc = nlp(self.clean_for_fuzzy(context_str))
             sim = user_doc.similarity(context_doc) if user_doc.vector_norm > 0 else 0
@@ -165,7 +191,7 @@ class AIAutomationFramework:
 
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        if matches and matches[0]['total'] > 12:  # Threshold for confidence
+        if matches and matches[0]['total'] > 12:
             best = matches[0]['element']
             return {
                 "intent": intent,
@@ -182,20 +208,22 @@ class AIAutomationFramework:
         """Maps page for Spark Assist POM generation."""
         elements = self._get_deep_elements()
         for el in elements:
+            # Clean key for Python method naming
             intent_key = el['intent'].lower().replace(" ", "_").strip(":")
             if not user_intent or user_intent.lower() in el['intent'].lower():
                 ai_ctx["buffer"][intent_key] = {
                     "intent": el['intent'],
                     "component_type": "DROPDOWN" if el['isDropdown'] else "TEXTBOX" if el['isInput'] else "BUTTON",
                     "xpath": el['xpath'],
-                    "template_xpath": el['template_xpath'], # <--- ADD THIS LINE
+                    "template_xpath": el['template_xpath'],
                     "is_data_input": el['isInput'],
-                    "name": el['name'] # <--- ALSO GOOD TO ADD
+                    "name": el['name'],
+                    "placeholder": el['placeholder']
                 }
         return ai_ctx["buffer"]
 
     def get_step_metadata(self, step_text):
-        """Entry point for Gherkin Phase-1/Phase-2 execution."""
+        """Phase-1 Discovery & Phase-2 Interaction Logic."""
         results = []
         params = re.findall(r"[\"'](.*?)[\"']|<(.*?)>|\{(.*?)\}", step_text)
         intents = [next((i for i in g if i), None) for g in params if any(g)]
@@ -204,11 +232,12 @@ class AIAutomationFramework:
             meta = self._find_locator_weighted(intent)
             if meta:
                 results.append(meta)
-                # Auto-click dropdowns to reveal options for subsequent parameters
+                # Auto-open dropdowns so options become visible to the scraper for next parameter
                 if i == 0 and meta['component_type'] == "DROPDOWN":
                     try:
                         el = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable((By.XPATH, meta['xpath'])))
                         self.driver.execute_script("arguments[0].click();", el)
-                        time.sleep(0.8) # Wait for portal/animation
-                    except: pass
+                        time.sleep(0.8)  # Wait for UI animation/portal rendering
+                    except:
+                        pass
         return results
