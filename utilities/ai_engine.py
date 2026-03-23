@@ -68,90 +68,103 @@ class AIAutomationFramework:
             return False
 
     def _get_deep_elements(self):
-        """ARCHITECT SCRAPER: Pairs Labels to Controls using Geometric Proximity."""
+        """ARCHITECT SCRAPER: Pairs Labels to Controls with strict JS safety guards and try/catch blocks."""
         return self.driver.execute_script("""
             const getControlInfo = (el) => {
-                const style = window.getComputedStyle(el);
-                const tag = el.tagName.toUpperCase(); 
-                const role = (el.getAttribute('role') || "").toLowerCase();
-                const type = (el.getAttribute('type') || "").toLowerCase();
-                const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0 && style.visibility !== 'hidden';
+                try {
+                    const style = window.getComputedStyle(el);
+                    const tag = (el.tagName || "").toUpperCase(); 
 
-                // 🚀 Classification Logic: Handles Native, ARIA, and Role-less Apps (Class-based heuristics)
-                const isDropdown = tag === 'SELECT' || 
-                                   role.includes('combobox') || 
-                                   role.includes('listbox') || 
-                                   (style.cursor === 'pointer' && (
-                                       el.innerText.includes('▼') || 
-                                       el.querySelector('svg') || 
-                                       /select|dropdown/i.test(el.className)
-                                   ));
+                    // 🛡️ SAFETY GUARDS: Ensure we never call .includes() on null/undefined
+                    const role = (el.getAttribute('role') || "").toLowerCase();
+                    const type = (el.getAttribute('type') || "").toLowerCase();
+                    const className = (typeof el.className === 'string' ? el.className : "").toLowerCase();
+                    const text = (el.innerText || "").trim();
 
-                const isTextarea = tag === 'TEXTAREA' || role === 'textbox';
+                    const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0 && style.visibility !== 'hidden';
 
-                // Categorize as Input if it's a standard field, a textarea, or a select box
-                const isInput = (tag === 'INPUT' && !['button', 'submit', 'checkbox', 'radio'].includes(type)) || 
-                                isTextarea || tag === 'SELECT';
+                    // 🚀 Classification Logic with Null-Safety
+                    const isDropdown = tag === 'SELECT' || 
+                                       role.includes('combobox') || 
+                                       role.includes('listbox') || 
+                                       (style.cursor === 'pointer' && (
+                                           text.includes('▼') || 
+                                           !!el.querySelector('svg') || 
+                                           className.includes('select') || 
+                                           className.includes('dropdown')
+                                       ));
 
-                return {
-                    tag: tag, role: role,
-                    aria: el.getAttribute('aria-label') || "",
-                    placeholder: el.getAttribute('placeholder') || "",
-                    name: el.getAttribute('name') || "",
-                    id: el.id || "",
-                    isDropdown: isDropdown,
-                    isInput: isInput,
-                    isVisible: isVisible
-                };
+                    const isTextarea = tag === 'TEXTAREA' || role === 'textbox';
+                    const isInput = (tag === 'INPUT' && !['button', 'submit', 'checkbox', 'radio'].includes(type)) || 
+                                    isTextarea || tag === 'SELECT';
+
+                    return {
+                        tag: tag, role: role,
+                        aria: (el.getAttribute('aria-label') || ""),
+                        placeholder: (el.getAttribute('placeholder') || ""),
+                        name: (el.getAttribute('name') || ""),
+                        id: (el.id || ""),
+                        isDropdown: isDropdown,
+                        isInput: isInput,
+                        isVisible: isVisible
+                    };
+                } catch (e) {
+                    return null; // Return null if a specific element's computed style fails
+                }
             };
 
             const generateSemanticXPath = (el, intentText) => {
-                const clean = intentText.replace(/[":]/g, "").trim();
-                return `//*[contains(normalize-space(), "${clean}")]/following::*[(self::input or self::select or self::textarea or @role or @onclick or contains(@style, "cursor: pointer"))][1]`;
+                try {
+                    const clean = (intentText || "").replace(/[":]/g, "").trim();
+                    return `//*[contains(normalize-space(), "${clean}")]/following::*[(self::input or self::select or self::textarea or @role or @onclick or contains(@style, "cursor: pointer"))][1]`;
+                } catch (e) { return ""; }
             };
 
             const found = [];
-            const all = Array.from(document.querySelectorAll('*'));
+            try {
+                const all = Array.from(document.querySelectorAll('*'));
 
-            // 1. Identify valid interactable controls
-            const controls = all.filter(el => {
-                const info = getControlInfo(el);
-                return info.isVisible && (window.getComputedStyle(el).cursor === 'pointer' || el.onclick || info.isInput);
-            });
+                // 1. Identify valid interactable controls
+                const controls = all.map(el => {
+                    const info = getControlInfo(el);
+                    if (info && info.isVisible && (window.getComputedStyle(el).cursor === 'pointer' || el.onclick || info.isInput)) {
+                        return { el, info };
+                    }
+                    return null;
+                }).filter(item => item !== null);
 
-            // 2. Scan for Label candidates (Relaxed for React/MUI nesting)
-            all.filter(el => {
-                const text = el.innerText?.trim() || "";
-                // Relaxed child limit (<= 3) to handle MUI icons/formatting inside labels
-                return text.length > 1 && text.length < 60 && el.children.length <= 3 && 
-                       !['INPUT', 'SELECT', 'TEXTAREA', 'SCRIPT', 'STYLE'].includes(el.tagName.toUpperCase());
-            }).forEach(node => {
-                const rT = node.getBoundingClientRect();
-                let closest = null; let minDist = 200; 
+                // 2. Scan for Label candidates
+                all.filter(el => {
+                    try {
+                        const text = (el.innerText || "").trim();
+                        const tag = (el.tagName || "").toUpperCase();
+                        return text.length > 1 && text.length < 60 && el.children.length <= 3 && 
+                               !['INPUT', 'SELECT', 'TEXTAREA', 'SCRIPT', 'STYLE'].includes(tag);
+                    } catch(e) { return false; }
+                }).forEach(node => {
+                    const rT = node.getBoundingClientRect();
+                    let closest = null; let minDist = 200; 
 
-                controls.forEach(c => {
-                    if (c === node) return;
-                    const rC = c.getBoundingClientRect();
-                    const d = Math.hypot(
-                        (rT.left + rT.width/2) - (rC.left + rC.width/2), 
-                        (rT.top + rT.height/2) - (rC.top + rC.height/2)
-                    );
-                    if (d < minDist) { 
-                        minDist = d; 
-                        closest = c; 
+                    controls.forEach(item => {
+                        const c = item.el;
+                        if (c === node) return;
+                        const rC = c.getBoundingClientRect();
+                        const d = Math.hypot((rT.left+rT.width/2)-(rC.left+rC.width/2), (rT.top+rT.height/2)-(rC.top+rC.height/2));
+                        if (d < minDist) { minDist = d; closest = item; }
+                    });
+
+                    if (closest) {
+                        found.push({
+                            intent: node.innerText.trim(),
+                            ...closest.info,
+                            template_xpath: generateSemanticXPath(closest.el, node.innerText.trim()),
+                            xpath: `(${closest.info.tag})[${Array.from(document.querySelectorAll(closest.info.tag)).indexOf(closest.el) + 1}]`
+                        });
                     }
                 });
-
-                if (closest) {
-                    const info = getControlInfo(closest);
-                    found.push({
-                        intent: node.innerText.trim(),
-                        ...info,
-                        template_xpath: generateSemanticXPath(closest, node.innerText.trim()),
-                        xpath: `(${info.tag})[${Array.from(document.querySelectorAll(info.tag)).indexOf(closest) + 1}]`
-                    });
-                }
-            });
+            } catch (globalError) {
+                console.error("AI Scraper Global Error:", globalError);
+            }
             return found;
         """)
 
