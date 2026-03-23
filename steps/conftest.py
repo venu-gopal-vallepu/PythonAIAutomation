@@ -65,35 +65,54 @@ def pytest_bdd_before_scenario(request, feature, scenario):
 
 
 @pytest.hookimpl
-def pytest_bdd_before_step(request, feature, scenario, step, step_func):
+def pytest_bdd_before_step(request, feature, scenario, step):
     """
-    NEW STRATEGY: Run AI BEFORE the step.
-    This allows the AI to click triggers and find dynamic templates while the UI is interactive.
+    MASTER ARCHITECT: Enhanced AI Discovery & Metadata Sync.
+    Captures Semantic Anchors, Names, and Placeholders for Self-Healing Page Objects.
     """
+    # Only run discovery if the [ai] tag is present and --generate is active
     if "[ai]" in step.name.lower() and request.config.getoption("--generate"):
         ai_ctx = request.getfixturevalue("ai_context")
         setup_data = request.getfixturevalue("setup")
         engine = request.getfixturevalue("ai_engine")
+
+        # Ensure the engine has the current active driver
         engine.driver = setup_data['driver']
 
-        # Get the RAW text (e.g., <Regions>) for Template generation
+        # 1. Extract the RAW Gherkin text to find placeholders
+        # Essential to find the 'Label' intent, not the injected test data.
         try:
             scenario_def = next((s for s in feature.scenarios.values() if s.name in scenario.name), None)
             raw_step = next(s for s in scenario_def.steps if s.line_number == step.line_number)
             raw_text = raw_step.name
-        except:
+        except Exception:
             raw_text = step.name
 
-        print(f"\n🤖 [AI Discovery]: Processing '{raw_text}'")
+        print(f"\n🤖 [AI Architect]: Scanning UI for Intent: '{raw_text}'")
 
-        # This calls our Master Framework logic (Two-Phase Clicks + Templates)
+        # 2. Trigger the Geometric Neighbor Scraper + Two-Phase Click Logic
+        # This handles clicking the dropdown trigger to 'reveal' options for discovery.
         metadata_list = engine.get_step_metadata(raw_text)
 
         if metadata_list:
             for meta in metadata_list:
-                # Store the full metadata (including template_xpath and is_parameterized)
-                ai_ctx["buffer"][meta['intent']] = meta
-            print(f"✅ Cached {len(metadata_list)} metadata objects for Spark")
+                # Normalize key to snake_case for clean Spark POM method naming
+                intent_key = meta['intent'].lower().replace(" ", "_").strip(":")
+
+                # 3. Synchronize COMPREHENSIVE metadata with the AI Context Buffer
+                # We include Template, Name, and Placeholder for multi-layered self-healing.
+                ai_ctx["buffer"][intent_key] = {
+                    "intent": meta['intent'],
+                    "component_type": meta['component_type'],
+                    "xpath": meta['xpath'],
+                    "template_xpath": meta.get('template_xpath'),  # Geometric Anchor
+                    "name": meta.get('name'),  # Backend Anchor
+                    "placeholder": meta.get('placeholder'),  # Visual Safety Net
+                    "is_data_input": meta.get('is_data_input', False),
+                    "is_parameterized": True if any(x in raw_text for x in ["{", "<", "'", '"']) else False
+                }
+
+            print(f"✅ AI Context Synced: {len(metadata_list)} items captured.")
 
 
 @pytest.hookimpl
@@ -130,8 +149,8 @@ def pytest_bdd_after_scenario(request, feature, scenario):
         payload = {
             "prompt": ai_ctx.get("prompt"),
             "scenario": scenario.name,
-            "mappings": list(ai_ctx["buffer"].values()), # Contains template_xpath, component_type
-            "base_page_source": base_source,             # RE-ADDED FOR SPARK CONTEXT
+            "mappings": list(ai_ctx["buffer"].values()),  # Contains template_xpath, component_type
+            "base_page_source": base_source,  # RE-ADDED FOR SPARK CONTEXT
             "is_append": is_append
         }
 

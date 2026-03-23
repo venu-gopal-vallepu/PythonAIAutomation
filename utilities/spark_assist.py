@@ -2,6 +2,7 @@ import requests
 import os
 import re
 
+
 class SparkAssist:
     def __init__(self):
         self.api_url = os.getenv("SPARK_API_URL", "https://your-spark-instance.ai/v1/chat")
@@ -15,30 +16,31 @@ class SparkAssist:
         ai_prompt = payload.get('prompt', 'No specific instructions provided.')
         base_source = payload.get('base_page_source', '')
 
-        # 2. UPDATED System Instruction for Dynamic Parameterization
+        # 🏛️ ARCHITECT-LEVEL SYSTEM INSTRUCTIONS (UPDATED FOR SELF-HEALING)
         system_instruction = (
-            "ROLE: Senior Automation Architect.\n"
-            "STRICT RULES FOR DYNAMIC DATA (EXAMPLES TABLE):\n"
-            "1. NO HARDCODED VALUES: If an element has 'template_xpath', use it with .format(value=param).\n"
-            "2. METHOD SIGNATURES:\n"
-            "   - If 'is_data_input' is True OR 'template_xpath' exists, the method MUST accept a parameter (e.g., 'text' or 'value').\n"
-            "   - Example: def select_role(self, role_name): self.click(self.role_template.format(value=role_name))\n"
-            "3. COMPONENT LOGIC:\n"
-            "   - DROPDOWN: Use 'template_xpath' to click the specific item revealed by the trigger.\n"
-            "   - TEXTBOX: Use the static 'xpath' but accept 'text' as a method parameter.\n"
-            "   - TOGGLE: Generate code to check .is_selected() before clicking to ensure it matches desired state.\n"
-            "4. CLASS STRUCTURE: Inherit from BasePage. If is_append is True, only return new methods.\n"
-            "5. BASE_PAGE CONTEXT: Use methods found in the provided BASE_PAGE_METHODS (e.g., self.click_element, self.type_text).\n"
-            "OUTPUT: ONLY raw Python code. No markdown, no explanations."
+            "ROLE: Senior Test Automation Architect.\n"
+            "CONTEXT: Generating Python Page Object code for Selenium/Pytest.\n\n"
+            "STRICT ARCHITECTURAL RULES:\n"
+            "1. SEMANTIC ANCHORING: Use 'template_xpath' as the primary locator.\n"
+            "2. SELF-HEALING LOCATORS: If 'name' or 'placeholder' exist in mappings, incorporate them as fallbacks.\n"
+            "   - Example: f\"//input[@name='{name}' or @placeholder='{placeholder}'] | {template_xpath}\"\n"
+            "3. DYNAMIC METHODS: All methods MUST accept parameters if data is involved.\n"
+            "   - Format: def set_{intent}(self, value): or def select_{intent}(self, option):\n"
+            "4. DROPDOWN LOGIC: If component_type is 'DROPDOWN':\n"
+            "   - Click the trigger using its locator, then click the list item via text: f\"//*[text()='{value}']\"\n"
+            "5. BASE_PAGE CONTEXT: Inherit from BasePage. Use ONLY the wrapper methods found in the provided BASE_PAGE_SOURCE (e.g., self.do_click, self.enter_text).\n"
+            "6. OUTPUT: Return ONLY raw Python code. NO markdown (```), NO explanations, NO prose."
         )
 
-        # 3. Comprehensive User Content (Sending full base source for context)
         user_content = (
-            f"SCENARIO_NAME: {scenario_name}\n"
-            f"USER_PROMPT: {ai_prompt}\n"
-            f"METADATA_FROM_AI_ENGINE: {mappings}\n"
+            f"--- CONFIGURATION ---\n"
+            f"SCENARIO: {scenario_name}\n"
             f"IS_APPEND: {is_append}\n"
-            f"BASE_PAGE_FULL_CONTEXT:\n{base_source}" # Sending full source so Spark sees all method names
+            f"INSTRUCTIONS: {ai_prompt}\n\n"
+            f"--- UI METADATA (MAPPINGS) ---\n"
+            f"{mappings}\n\n"
+            f"--- BASE_PAGE_SOURCE (STYLE GUIDE) ---\n"
+            f"{base_source}"
         )
 
         try:
@@ -51,7 +53,7 @@ class SparkAssist:
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_content}
                     ],
-                    "temperature": 0.1 # Keep it deterministic
+                    "temperature": 0.1
                 },
                 timeout=60
             )
@@ -59,4 +61,4 @@ class SparkAssist:
             raw_code = response.json()['choices'][0]['message']['content']
             return re.sub(r'```python|```', '', raw_code).strip()
         except Exception as e:
-            return f"# ❌ Spark Error: {str(e)}"
+            return f"# ❌ Spark Assist Error: {str(e)}"
