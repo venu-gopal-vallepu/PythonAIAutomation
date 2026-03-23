@@ -68,23 +68,29 @@ class AIAutomationFramework:
             return False
 
     def _get_deep_elements(self):
-        """ARCHITECT SCRAPER: Pairs Labels to Controls with strict JS safety guards and try/catch blocks."""
+        """ARCHITECT SCRAPER: Pairs Labels to Controls with Input-Priority logic."""
         return self.driver.execute_script("""
             const getControlInfo = (el) => {
                 try {
                     const style = window.getComputedStyle(el);
                     const tag = (el.tagName || "").toUpperCase(); 
-
-                    // 🛡️ SAFETY GUARDS: Ensure we never call .includes() on null/undefined
                     const role = (el.getAttribute('role') || "").toLowerCase();
                     const type = (el.getAttribute('type') || "").toLowerCase();
                     const className = (typeof el.className === 'string' ? el.className : "").toLowerCase();
                     const text = (el.innerText || "").trim();
-
                     const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0 && style.visibility !== 'hidden';
 
-                    // 🚀 Classification Logic with Null-Safety
-                    const isDropdown = tag === 'SELECT' || 
+                    if (!isVisible) return null;
+
+                    // 🚀 1. INPUT PRIORITY: Check the element OR its children for input fields
+                    const hasInternalInput = el.querySelector('input, textarea, [role="textbox"]');
+                    const isTextarea = tag === 'TEXTAREA' || role === 'textbox';
+                    const isInput = (tag === 'INPUT' && !['button', 'submit', 'checkbox', 'radio'].includes(type)) || 
+                                    isTextarea || !!hasInternalInput;
+
+                    // 🚀 2. DROPDOWN LOGIC: Only check if NOT already identified as a Textbox
+                    const isDropdown = !isInput && (
+                                       tag === 'SELECT' || 
                                        role.includes('combobox') || 
                                        role.includes('listbox') || 
                                        (style.cursor === 'pointer' && (
@@ -92,14 +98,11 @@ class AIAutomationFramework:
                                            !!el.querySelector('svg') || 
                                            className.includes('select') || 
                                            className.includes('dropdown')
-                                       ));
-
-                    const isTextarea = tag === 'TEXTAREA' || role === 'textbox';
-                    const isInput = (tag === 'INPUT' && !['button', 'submit', 'checkbox', 'radio'].includes(type)) || 
-                                    isTextarea || tag === 'SELECT';
+                                       )));
 
                     return {
-                        tag: tag, role: role,
+                        tag: tag, 
+                        role: role,
                         aria: (el.getAttribute('aria-label') || ""),
                         placeholder: (el.getAttribute('placeholder') || ""),
                         name: (el.getAttribute('name') || ""),
@@ -108,9 +111,7 @@ class AIAutomationFramework:
                         isInput: isInput,
                         isVisible: isVisible
                     };
-                } catch (e) {
-                    return null; // Return null if a specific element's computed style fails
-                }
+                } catch (e) { return null; }
             };
 
             const generateSemanticXPath = (el, intentText) => {
@@ -127,17 +128,19 @@ class AIAutomationFramework:
                 // 1. Identify valid interactable controls
                 const controls = all.map(el => {
                     const info = getControlInfo(el);
-                    if (info && info.isVisible && (window.getComputedStyle(el).cursor === 'pointer' || el.onclick || info.isInput)) {
+                    // Filter: Must be visible and either an Input, a Pointer, or have an onclick
+                    if (info && (window.getComputedStyle(el).cursor === 'pointer' || el.onclick || info.isInput)) {
                         return { el, info };
                     }
                     return null;
                 }).filter(item => item !== null);
 
-                // 2. Scan for Label candidates
+                // 2. Scan for Label candidates (Proximity Scan)
                 all.filter(el => {
                     try {
                         const text = (el.innerText || "").trim();
                         const tag = (el.tagName || "").toUpperCase();
+                        // Relaxed child limit to handle MUI/React nested spans inside labels
                         return text.length > 1 && text.length < 60 && el.children.length <= 3 && 
                                !['INPUT', 'SELECT', 'TEXTAREA', 'SCRIPT', 'STYLE'].includes(tag);
                     } catch(e) { return false; }
@@ -149,8 +152,14 @@ class AIAutomationFramework:
                         const c = item.el;
                         if (c === node) return;
                         const rC = c.getBoundingClientRect();
-                        const d = Math.hypot((rT.left+rT.width/2)-(rC.left+rC.width/2), (rT.top+rT.height/2)-(rC.top+rC.height/2));
-                        if (d < minDist) { minDist = d; closest = item; }
+                        const d = Math.hypot(
+                            (rT.left + rT.width/2) - (rC.left + rC.width/2), 
+                            (rT.top + rT.height/2) - (rC.top + rC.height/2)
+                        );
+                        if (d < minDist) { 
+                            minDist = d; 
+                            closest = item; 
+                        }
                     });
 
                     if (closest) {
@@ -162,9 +171,7 @@ class AIAutomationFramework:
                         });
                     }
                 });
-            } catch (globalError) {
-                console.error("AI Scraper Global Error:", globalError);
-            }
+            } catch (globalError) { console.error("AI Scraper Error:", globalError); }
             return found;
         """)
 
