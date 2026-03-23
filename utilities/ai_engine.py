@@ -7,6 +7,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from thefuzz import fuzz, process
 
+
 class AIAutomationFramework:
     def __init__(self, driver, timeout=10):
         self.driver = driver
@@ -38,65 +39,59 @@ class AIAutomationFramework:
         return re.sub(r'[^a-zA-Z\s]', '', text).lower().replace('_', ' ').strip()
 
     def _get_deep_elements(self):
-        """P1 STABLE SCRAPER: Fast, deterministic detection of all 5 HTML types + Textarea."""
+        """🚀 P1 FULL-SPECTRUM SCRAPER: Synchronized for Python Scoring."""
         return self.driver.execute_script("""
             const found = [];
-            // 🚀 1. TARGETED SELECTOR: Avoids 'all (*)' to prevent hanging/loops
-            const selectors = 'input, button, select, textarea, [role="combobox"], [role="checkbox"], [role="radio"], [role="button"], [role="textbox"]';
-            const controls = document.querySelectorAll(selectors);
+            const allElements = document.querySelectorAll('input, button, select, textarea, [role], [aria-haspopup], div, span, a');
 
-            controls.forEach(el => {
+            allElements.forEach(el => {
                 try {
                     const style = window.getComputedStyle(el);
-                    if (el.offsetWidth === 0 || style.visibility === 'hidden') return;
+                    if (el.offsetWidth === 0 || style.visibility === 'hidden' || style.display === 'none') return;
 
                     const tag = el.tagName.toLowerCase();
-                    const type = (el.getAttribute('type') || "").toLowerCase();
+                    const isStandard = ['input', 'button', 'select', 'textarea', 'a'].includes(tag);
                     const role = (el.getAttribute('role') || "").toLowerCase();
-                    const id = el.id || "";
-                    const name = el.getAttribute('name') || "";
-                    const placeholder = el.getAttribute('placeholder') || "";
+                    const isPointer = style.cursor === 'pointer';
 
-                    // 🚀 2. INTENT DETECTION (Labeling)
-                    let intent = "";
-                    const nativeLabel = document.querySelector(`label[for="${id}"]`) || el.closest('label');
-                    if (nativeLabel) intent = nativeLabel.innerText;
-                    else if (placeholder) intent = placeholder;
-                    else if (name) intent = name;
-                    else {
-                        const prevText = el.previousElementSibling?.innerText || el.parentElement?.innerText;
-                        intent = (prevText && prevText.length < 50) ? prevText : (el.innerText || "");
+                    if (!isStandard && role === "" && !isPointer) return;
+
+                    const type = (el.getAttribute('type') || "").toLowerCase();
+                    const aria = el.getAttribute('aria-haspopup') || "";
+                    const cls = el.className.toString().toLowerCase();
+
+                    let cType = "BUTTON"; 
+                    if (tag === 'select' || role.includes('box') || aria !== "" || cls.includes('select')) {
+                        cType = "DROPDOWN";
+                    } else if (tag === 'textarea' || (tag === 'input' && !['checkbox', 'radio'].includes(type))) {
+                        cType = "TEXTBOX";
+                    } else if (type === 'checkbox' || role === 'checkbox') {
+                        cType = "CHECKBOX";
+                    } else if (type === 'radio' || role === 'radio') {
+                        cType = "RADIO";
                     }
 
-                    // 🚀 3. CLASSIFICATION (The 5-Element Matrix)
-                    let cType = "BUTTON";
-                    if (tag === 'select' || role.includes('box')) cType = "DROPDOWN";
-                    else if (type === 'checkbox' || role === 'checkbox') cType = "CHECKBOX";
-                    else if (type === 'radio' || role === 'radio') cType = "RADIO";
-                    else if (tag === 'input' || tag === 'textarea' || role === 'textbox') cType = "TEXTBOX";
-
-                    // 🚀 4. CLEAN LOCATOR GENERATOR (Prioritizes Direct Attributes)
-                    let finalXpath = "";
-                    if (name) finalXpath = `//${tag}[@name='${name}']`;
-                    else if (placeholder) finalXpath = `//${tag}[@placeholder='${placeholder}']`;
-                    else if (id && !id.includes(':') && !id.startsWith('mui')) finalXpath = `//${tag}[@id='${id}']`;
-                    else {
-                        const cleanIntent = intent.trim().split('\\n')[0].replace(/[":]/g, "");
-                        finalXpath = `//*[contains(normalize-space(), "${cleanIntent}")]/following::${tag}[1]`;
+                    let intent = (el.placeholder || el.name || el.getAttribute('aria-label') || el.innerText || "").split('\\n')[0].trim();
+                    if (!intent || intent.length < 2) {
+                        const label = document.querySelector(`label[for="${el.id}"]`) || el.closest('label');
+                        intent = label ? label.innerText : "";
                     }
+                    if (!intent) intent = el.parentElement?.innerText?.split('\\n')[0] || "Unknown";
+
+                    let xpath = el.name ? `//${tag}[@name='${el.name}']` : `//*[contains(normalize-space(), "${intent.replace(/[":]/g, "").trim()}")]`;
 
                     found.push({
-                        intent: intent.trim().split('\\n')[0].replace(/:$/, ""),
+                        intent: intent.replace(/:$/, "").trim(),
                         component_type: cType,
-                        xpath: finalXpath,
-                        template_xpath: `//*[contains(normalize-space(), "${intent.trim().split('\\n')[0].replace(/[":]/g, "")}")]/following::${tag}[1]`,
+                        xpath: xpath,
+                        template_xpath: `//*[contains(normalize-space(), "${intent.replace(/[":]/g, "").trim()}")]/following::${tag}[1]`,
                         is_data_input: (cType === "TEXTBOX" || cType === "DROPDOWN"),
-                        name: name,
-                        placeholder: placeholder,
                         tag: tag,
-                        aria: el.getAttribute('aria-label') || "",
                         role: role,
-                        id: id
+                        id: el.id || "",
+                        aria: el.getAttribute('aria-label') || "",
+                        placeholder: el.placeholder || "",
+                        name: el.name || ""
                     });
                 } catch (e) {}
             });
@@ -118,6 +113,7 @@ class AIAutomationFramework:
 
         for el in elements:
             max_score = 0
+            # ✅ FIXED: Now matches the keys returned by JavaScript
             attr_map = {
                 'aria-label': el['aria'],
                 'placeholder': el['placeholder'],
@@ -130,27 +126,23 @@ class AIAutomationFramework:
             for attr, weight in self.WEIGHTS.items():
                 val = attr_map.get(attr, "")
                 if val:
-                    # Fuzzy match score (0-100)
                     score = fuzz.token_sort_ratio(clean_intent, self.clean_for_fuzzy(str(val)))
-                    # Apply Architect's Weighting (Booster/Penalty)
                     max_score = max(max_score, score * weight)
 
-            # Extra Booster: NLP Similarity
             context_str = f"{el['intent']} {el['name']} {el['placeholder']} {el['role']}"
             context_doc = nlp(self.clean_for_fuzzy(context_str))
-            sim = user_doc.similarity(context_doc) if user_doc.vector_norm > 0 else 0
+            sim = user_doc.similarity(context_doc) if (user_doc.vector_norm > 0 and context_doc.vector_norm > 0) else 0
 
-            # Combine Fuzzy and NLP
             total_score = max_score * (sim + 0.1)
             matches.append({"total": total_score, "element": el})
 
         matches.sort(key=lambda x: x['total'], reverse=True)
 
-        # Threshold for P1 Stability
         if matches and matches[0]['total'] > 12:
             best = matches[0]['element']
+            # ✅ FIXED: Return all keys required by discover_and_map and Spark
             return {
-                "intent": intent,
+                "intent": best['intent'],
                 "component_type": best['component_type'],
                 "xpath": best['xpath'],
                 "template_xpath": best['template_xpath'],
@@ -193,5 +185,6 @@ class AIAutomationFramework:
                         el = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable((By.XPATH, meta['xpath'])))
                         self.driver.execute_script("arguments[0].click();", el)
                         time.sleep(0.5)
-                    except: pass
+                    except:
+                        pass
         return results
