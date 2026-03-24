@@ -196,10 +196,64 @@ class AIAutomationFramework:
         matches.sort(key=lambda x: x['total'], reverse=True)
         if matches and matches[0]['total'] >= self.THRESHOLD:
             best = matches[0]['element']
+
+            # 🕵️‍♂️ Trigger the Visual Debugger
+            target_el = self.driver.find_element(By.XPATH, best['xpath'])
+            self.draw_ai_connection(best['intent'], target_el)
             return best
         return None
 
     # --- 🏗️ ORCHESTRATION & P2 SELF-HEALING ---
+
+    def draw_ai_connection(self, label_text, target_element):
+        """🚀 THE X-RAY: Draws a line from the Label to the identified Element."""
+        try:
+            self.driver.execute_script("""
+                const drawLine = (text, el) => {
+                    const label = Array.from(document.querySelectorAll('label, span, td, div'))
+                                       .find(e => e.innerText.trim().includes(text));
+                    if (!label || !el) return;
+
+                    const rect1 = label.getBoundingClientRect();
+                    const rect2 = el.getBoundingClientRect();
+
+                    const canvas = document.createElement('canvas');
+                    canvas.id = 'ai_debug_canvas';
+                    canvas.style.position = 'fixed';
+                    canvas.style.top = '0';
+                    canvas.style.left = '0';
+                    canvas.style.width = '100%';
+                    canvas.style.height = '100%';
+                    canvas.style.zIndex = '10000';
+                    canvas.style.pointerEvents = 'none';
+                    document.body.appendChild(canvas);
+
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = window.innerWidth;
+                    canvas.height = window.innerHeight;
+
+                    // Draw Circle on Label
+                    ctx.beginPath();
+                    ctx.arc(rect1.left + rect1.width/2, rect1.top + rect1.height/2, 10, 0, 2 * Math.PI);
+                    ctx.strokeStyle = '#ff6b6b';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+
+                    // Draw Line to Element
+                    ctx.beginPath();
+                    ctx.moveTo(rect1.left + rect1.width/2, rect1.top + rect1.height/2);
+                    ctx.lineTo(rect2.left + rect2.width/2, rect2.top + rect2.height/2);
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeStyle = '#4ecdc4';
+                    ctx.stroke();
+
+                    // Remove after 2 seconds
+                    setTimeout(() => canvas.remove(), 2000);
+                };
+                drawLine(arguments[0], arguments[1]);
+            """, label_text, target_element)
+        except:
+            pass
 
     def get_step_metadata(self, step_text):
         """🚀 THE P2 ORCHESTRATOR: Uses Memory first, then Heals."""
