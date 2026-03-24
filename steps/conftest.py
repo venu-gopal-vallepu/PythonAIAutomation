@@ -2,6 +2,7 @@ import os
 import pytest
 import re
 import json
+import time
 from selenium import webdriver
 from utilities.ai_engine import AIAutomationFramework
 from utilities.spark_assist import SparkAssist
@@ -19,23 +20,37 @@ def pytest_addoption(parser):
 
 
 # --- Fixtures ---
+
+@pytest.fixture(scope="session")
+def ai_engine():
+    """
+    🚀 P2 PERSISTENCE:
+    Initialized once per session to keep SpaCy NLP model in memory.
+    Handles the 'ai_ui_memory.json' for Self-Healing.
+    """
+    # We pass None for driver initially; it gets injected per-test
+    return AIAutomationFramework(driver=None)
+
+
 @pytest.fixture()
-def setup(request):
+def setup(request, ai_engine):
+    """
+    🔧 BROWSER SETUP:
+    Injects the active driver into the AI Engine for real-time healing.
+    """
     driver = webdriver.Chrome()
     driver.maximize_window()
+
+    # 🛰️ P2 Injection: Tell the AI Engine which browser to 'watch'
+    ai_engine.driver = driver
+
     yield {'driver': driver}
     driver.quit()
 
 
-@pytest.fixture(scope="session")
-def ai_engine():
-    """Persistent AI Engine to keep Spacy NLP model loaded."""
-    return AIAutomationFramework(None)
-
-
 @pytest.fixture(scope="function")
 def ai_context():
-    """State manager for discovered metadata."""
+    """State manager for discovered metadata during --generate runs."""
     return {"prompt": "", "buffer": {}, "scenario_name": ""}
 
 
@@ -67,56 +82,51 @@ def pytest_bdd_before_scenario(request, feature, scenario):
 @pytest.hookimpl
 def pytest_bdd_before_step(request, feature, scenario, step):
     """
-    MASTER ARCHITECT: Enhanced AI Discovery & Metadata Sync.
-    Captures Semantic Anchors, Names, and Placeholders for Self-Healing Page Objects.
+    🚀 MASTER ARCHITECT: Enhanced AI Discovery & Metadata Sync.
+    Triggers during --generate to build the 'Memory' DNA for Spark.
     """
-    # Only run discovery if the [ai] tag is present and --generate is active
     if "[ai]" in step.name.lower() and request.config.getoption("--generate"):
         ai_ctx = request.getfixturevalue("ai_context")
         setup_data = request.getfixturevalue("setup")
         engine = request.getfixturevalue("ai_engine")
 
-        # Ensure the engine has the current active driver
+        # Sync driver again just in case
         engine.driver = setup_data['driver']
 
-        # 1. Extract the RAW Gherkin text to find placeholders
-        # Essential to find the 'Label' intent, not the injected test data.
         try:
+            # Extract RAW Gherkin to find placeholders
             scenario_def = next((s for s in feature.scenarios.values() if s.name in scenario.name), None)
             raw_step = next(s for s in scenario_def.steps if s.line_number == step.line_number)
             raw_text = raw_step.name
         except Exception:
             raw_text = step.name
 
-        print(f"\n🤖 [AI Architect]: Scanning UI for Intent: '{raw_text}'")
+        print(f"\n🤖 [AI Discovery]: Scanning UI for Intent: '{raw_text}'")
 
-        # 2. Trigger the Geometric Neighbor Scraper + Two-Phase Click Logic
-        # This handles clicking the dropdown trigger to 'reveal' options for discovery.
+        # 🎯 Use the Engine to find Metadata
         metadata_list = engine.get_step_metadata(raw_text)
 
         if metadata_list:
             for meta in metadata_list:
-                # Normalize key to snake_case for clean Spark POM method naming
                 intent_key = meta['intent'].lower().replace(" ", "_").strip(":")
 
-                # 3. Synchronize COMPREHENSIVE metadata with the AI Context Buffer
-                # We include Template, Name, and Placeholder for multi-layered self-healing.
+                # Sync metadata for Spark POM generation
                 ai_ctx["buffer"][intent_key] = {
                     "intent": meta['intent'],
                     "component_type": meta['component_type'],
                     "xpath": meta['xpath'],
-                    "template_xpath": meta.get('template_xpath'),  # Geometric Anchor
-                    "name": meta.get('name'),  # Backend Anchor
-                    "placeholder": meta.get('placeholder'),  # Visual Safety Net
-                    "is_data_input": meta.get('is_data_input', False),
+                    "tag": meta.get('tag'),
+                    "class": meta.get('class'),
                     "is_parameterized": True if any(x in raw_text for x in ["{", "<", "'", '"']) else False
                 }
-
             print(f"✅ AI Context Synced: {len(metadata_list)} items captured.")
 
 
 @pytest.hookimpl
 def pytest_bdd_after_scenario(request, feature, scenario):
+    """
+    ✨ SPARK ASSIST: Generates the POM file based on captured AI metadata.
+    """
     ai_ctx = request.getfixturevalue("ai_context")
 
     should_run = (
@@ -136,40 +146,33 @@ def pytest_bdd_after_scenario(request, feature, scenario):
         file_path = os.path.join(output_dir, file_name)
         is_append = os.path.exists(file_path)
 
-        # --- RE-INSERTED: BasePage context for Spark ---
         base_source = ""
         try:
-            # Adjust path if your BasePage is located elsewhere
             with open("utilities/base_page.py", "r", encoding='utf-8') as bf:
                 base_source = bf.read()
-        except Exception as e:
-            print(f"⚠️ Warning: Could not read base_page.py for context: {e}")
+        except Exception:
+            pass
 
-        # Updated Payload including the Handshake Keys and Base Source
         payload = {
             "prompt": ai_ctx.get("prompt"),
             "scenario": scenario.name,
-            "mappings": list(ai_ctx["buffer"].values()),  # Contains template_xpath, component_type
-            "base_page_source": base_source,  # RE-ADDED FOR SPARK CONTEXT
+            "mappings": list(ai_ctx["buffer"].values()),
+            "base_page_source": base_source,
             "is_append": is_append
         }
 
         try:
             spark = SparkAssist()
-            # Spark now knows BOTH the UI patterns AND your coding style (BasePage)
             generated_code = spark.generate_page_object(payload)
 
-            if is_append:
-                header = f"\n\n    # --- Actions for: {scenario.name} ---\n"
-                indented = "\n".join([f"    {l}" if l.strip() else l for l in generated_code.splitlines()])
-                content = header + indented
-                mode = "a"
-            else:
-                content = generated_code
-                mode = "w"
-
+            mode = "a" if is_append else "w"
             with open(file_path, mode, encoding='utf-8') as f:
-                f.write(content)
+                if is_append:
+                    f.write(f"\n\n    # --- Actions for: {scenario.name} ---\n")
+                    indented = "\n".join([f"    {l}" if l.strip() else l for l in generated_code.splitlines()])
+                    f.write(indented)
+                else:
+                    f.write(generated_code)
 
             print(f"✅ Success: Page Object logic written to {file_path}")
             processed_scenarios.add(scenario.name)
@@ -189,4 +192,4 @@ def pytest_runtest_makereport(item, call):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    print("\n--- 🏁 AI Generation Session Finished ---")
+    print("\n--- 🏁 AI Session Finished ---")

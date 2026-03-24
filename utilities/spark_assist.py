@@ -2,7 +2,6 @@ import requests
 import os
 import re
 
-
 class SparkAssist:
     def __init__(self):
         self.api_url = os.getenv("SPARK_API_URL", "https://your-spark-instance.ai/v1/chat")
@@ -16,31 +15,28 @@ class SparkAssist:
         ai_prompt = payload.get('prompt', 'No specific instructions provided.')
         base_source = payload.get('base_page_source', '')
 
-        # 🏛️ ARCHITECT-LEVEL SYSTEM INSTRUCTIONS (UPDATED FOR SELF-HEALING)
+        # 🏛️ NEW ARCHITECT-LEVEL SYSTEM INSTRUCTIONS (P2 SELF-HEALING)
         system_instruction = (
             "ROLE: Senior Test Automation Architect.\n"
-            "CONTEXT: Generating Python Page Object code for Selenium/Pytest.\n\n"
+            "CONTEXT: Generating Python Page Object code using an AI-Powered BasePage.\n\n"
             "STRICT ARCHITECTURAL RULES:\n"
-            "1. SEMANTIC ANCHORING: Use 'template_xpath' as the primary locator.\n"
-            "2. SELF-HEALING LOCATORS: If 'name' or 'placeholder' exist in mappings, incorporate them as fallbacks.\n"
-            "   - Example: f\"//input[@name='{name}' or @placeholder='{placeholder}'] | {template_xpath}\"\n"
-            "3. DYNAMIC METHODS: All methods MUST accept parameters if data is involved.\n"
-            "   - Format: def set_{intent}(self, value): or def select_{intent}(self, option):\n"
-            "4. DROPDOWN LOGIC: If component_type is 'DROPDOWN':\n"
-            "   - Click the trigger using its locator, then click the list item via text: f\"//*[text()='{value}']\"\n"
-            "5. BASE_PAGE CONTEXT: Inherit from BasePage. Use ONLY the wrapper methods found in the provided BASE_PAGE_SOURCE (e.g., self.do_click, self.enter_text).\n"
-            "6. OUTPUT: Return ONLY raw Python code. NO markdown (```), NO explanations, NO prose."
+            "1. UNIFIED ACTION: Use ONLY 'self.smart_action(intent, value)' for ALL UI interactions.\n"
+            "2. INTENT-BASED: The first argument of smart_action MUST be the exact 'intent' string from the mappings.\n"
+            "3. NO HARDCODED LOCATORS: Do NOT generate XPaths, IDs, or CSS selectors in the methods. The AI Engine resolves these via the intent string.\n"
+            "4. METHOD NAMING: Use snake_case based on the intent. (e.g., intent 'Permission Group' becomes def set_permission_group(self, value)).\n"
+            "5. COMPONENT AGNOSTIC: Whether it is a DROPDOWN, TEXTBOX, or BUTTON, always use self.smart_action.\n"
+            "   - If it's a click-only item (Button/Link), call self.smart_action(intent).\n"
+            "   - If it involves data (Textbox/Dropdown), call self.smart_action(intent, value).\n"
+            "6. BASE_PAGE CONTEXT: Inherit from BasePage. Ensure the constructor passes 'ai_engine' to super().__init__.\n"
+            "7. OUTPUT: Return ONLY raw Python code. NO markdown (```), NO explanations, NO prose."
         )
 
         user_content = (
             f"--- CONFIGURATION ---\n"
             f"SCENARIO: {scenario_name}\n"
-            f"IS_APPEND: {is_append}\n"
-            f"INSTRUCTIONS: {ai_prompt}\n\n"
-            f"--- UI METADATA (MAPPINGS) ---\n"
-            f"{mappings}\n\n"
-            f"--- BASE_PAGE_SOURCE (STYLE GUIDE) ---\n"
-            f"{base_source}"
+            f"UI MAPPINGS (INTENTS): {mappings}\n"
+            f"STYLE GUIDE (BASE_PAGE): {base_source}\n"
+            f"USER INSTRUCTIONS: {ai_prompt}"
         )
 
         try:
