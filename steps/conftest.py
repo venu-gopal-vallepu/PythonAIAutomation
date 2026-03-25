@@ -97,17 +97,71 @@ def pytest_bdd_before_step(request, feature, scenario, step):
 
 @pytest.hookimpl
 def pytest_bdd_after_scenario(request, feature, scenario):
-    ai_ctx, setup_data = request.getfixturevalue("ai_context"), request.getfixturevalue("setup")
-    if request.config.getoption("--generate") and ai_ctx["buffer"] and scenario.name not in processed_scenarios:
-        target = request.config.getoption("--page-file") or f"{setup_data['feature_name']}_page.py"
-        path = os.path.join("feature/page", target)
-        os.makedirs("feature/page", exist_ok=True)
+    """
+    ✨ SPARK ASSIST: Smart POM Generation with Context & BasePage Injection.
+    Combines Namespace logic with Source-Code Style Guide.
+    """
+    ai_ctx = request.getfixturevalue("ai_context")
+    setup_data = request.getfixturevalue("setup")
 
-        spark = SparkAssist()
-        code = spark.generate_page_object({
-            "page_name": setup_data['feature_name'], "scenario": scenario.name,
-            "mappings": list(ai_ctx["buffer"].values()), "is_append": os.path.exists(path),
-            "prompt": ai_ctx["prompt"]
-        })
-        with open(path, "a" if os.path.exists(path) else "w") as f: f.write(code)
-        processed_scenarios.add(scenario.name)
+    # 🎯 GATEKEEPER: Only run if --generate is on and we have captured metadata
+    should_run = (
+            request.config.getoption("--generate") and
+            ai_ctx.get("buffer") and
+            scenario.name not in processed_scenarios
+    )
+
+    if should_run:
+        # 📂 FOLDER LOGIC: Target feature/page/
+        target_file = request.config.getoption("--page-file")
+        output_dir = "feature/page"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Use --page-file if provided, else default to feature_name_page.py
+        file_name = target_file if target_file else f"{setup_data['feature_name']}_page.py"
+        file_path = os.path.join(output_dir, file_name)
+        is_append = os.path.exists(file_path)
+
+        # 📖 STYLE GUIDE: Read BasePage so Spark knows the parent class methods
+        base_source = ""
+        try:
+            with open("utilities/base_page.py", "r", encoding='utf-8') as bf:
+                base_source = bf.read()
+        except Exception:
+            pass
+
+        # 📦 THE COMPLETE PAYLOAD: Everything Spark needs to be "brilliant"
+        payload = {
+            "page_name": setup_data['feature_name'],
+            "scenario": scenario.name,
+            "mappings": list(ai_ctx["buffer"].values()),
+            "base_page_source": base_source,  # Gives AI the 'Smart Action' signature
+            "is_append": is_append,
+            "prompt": ai_ctx.get("prompt")  # Your # comments from Gherkin
+        }
+
+        try:
+            spark = SparkAssist()
+            generated_code = spark.generate_page_object(payload)
+
+            if is_append:
+                # 🛠️ SMART APPEND: Ensure methods are properly indented under the class
+                with open(file_path, "a", encoding='utf-8') as f:
+                    f.write(f"\n\n    # --- Actions for Scenario: {scenario.name} ---\n")
+                    # Indent 4 spaces to keep Python class structure valid
+                    indented_code = "\n".join([f"    {line}" if line.strip() else line
+                                               for line in generated_code.splitlines()])
+                    f.write(indented_code)
+            else:
+                # 🆕 NEW FILE: Write full class with imports
+                with open(file_path, "w", encoding='utf-8') as f:
+                    f.write(generated_code)
+
+            print(f"✅ Success: Spark logic written to {file_path}")
+            processed_scenarios.add(scenario.name)
+
+        except Exception as e:
+            print(f"❌ Spark Error: {e}")
+        finally:
+            # 🧹 CLEANUP: Clear buffer for the next scenario in the session
+            ai_ctx["buffer"] = {}
